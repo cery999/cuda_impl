@@ -73,7 +73,7 @@ __device__ void round_fn(uint32_t *state, const uint32_t *msg, size_t round) {
 }
 
 __global__ void blake3_compress_in_place_portable(
-    uint32_t cv[8], const uint8_t block[BLAKE3_BLOCK_LEN], uint8_t block_len,
+    uint32_t* cv, const uint8_t* block, uint8_t block_len,
     uint64_t counter, uint8_t flags) {
   uint32_t id = blockIdx.x * blockDim.x + threadIdx.x;
   uint32_t state[16];       // v0 - v15
@@ -96,26 +96,86 @@ __global__ void blake3_compress_in_place_portable(
   state[13] = (uint32_t)(counter >> 32);
   state[14] = (uint32_t)block_len;
   state[15] = (uint32_t)flags;
+
+  round_fn(state, &block_words[0], 0);
+  round_fn(state, &block_words[0], 1);
+  round_fn(state, &block_words[0], 2);
+  round_fn(state, &block_words[0], 3);
+  round_fn(state, &block_words[0], 4);
+  round_fn(state, &block_words[0], 5);
+  round_fn(state, &block_words[0], 6);
+
+  cv[0] = state[0] ^ state[8];
+  cv[1] = state[1] ^ state[9];
+  cv[2] = state[2] ^ state[10];
+  cv[3] = state[3] ^ state[11];
+  cv[4] = state[4] ^ state[12];
+  cv[5] = state[5] ^ state[13];
+  cv[6] = state[6] ^ state[14];
+  cv[7] = state[7] ^ state[15];
 }
 
-void hash_one_portable(const uint8_t *input, size_t blocks,
+inline void store32(void *dst, uint32_t w) {
+  uint8_t *p = (uint8_t *)dst;
+  p[0] = (uint8_t)(w >> 0);
+  p[1] = (uint8_t)(w >> 8);
+  p[2] = (uint8_t)(w >> 16);
+  p[3] = (uint8_t)(w >> 24);
+}
+
+inline void store_cv_words(uint8_t bytes_out[32], uint32_t cv_words[8]) {
+  store32(&bytes_out[0 * 4], cv_words[0]);
+  store32(&bytes_out[1 * 4], cv_words[1]);
+  store32(&bytes_out[2 * 4], cv_words[2]);
+  store32(&bytes_out[3 * 4], cv_words[3]);
+  store32(&bytes_out[4 * 4], cv_words[4]);
+  store32(&bytes_out[5 * 4], cv_words[5]);
+  store32(&bytes_out[6 * 4], cv_words[6]);
+  store32(&bytes_out[7 * 4], cv_words[7]);
+}
+
+void hash_one_cuda(const uint8_t *input, size_t blocks,
                        const uint32_t key[8], uint64_t counter, uint8_t flags,
                        uint8_t flags_start, uint8_t flags_end,
                        uint8_t out[BLAKE3_OUT_LEN]) {
   uint32_t cv[8];
   memcpy(cv, key, BLAKE3_KEY_LEN);
+  uint32_t *d_cv;
+  uint8_t *d_in;
+  checkCudaErrors(cudaMalloc((void **)&d_cv, BLAKE3_KEY_LEN));
+  checkCudaErrors(cudaMalloc((void **)&d_in, BLAKE3_BLOCK_LEN));
+  // create cuda event handles
+  cudaEvent_t start, stop;
+  checkCudaErrors(cudaEventCreate(&start));
+  checkCudaErrors(cudaEventCreate(&stop));
+  cudaEventRecord(start, 0);
+  cudaMemcpyAsync(d_cv, key, BLAKE3_KEY_LEN, cudaMemcpyHostToDevice, 0);
   uint8_t block_flags = flags | flags_start;
   while (blocks > 0) {
     if (blocks == 1) {
       block_flags |= flags_end;
     }
-    blake3_compress_in_place_portable<<<1, 1>>>(cv, input, BLAKE3_BLOCK_LEN,
+    cudaMemcpyAsync(d_in, input, BLAKE3_BLOCK_LEN, cudaMemcpyHostToDevice, 0);
+    blake3_compress_in_place_portable<<<1, 1, 0, 0>>>(d_cv, d_in, BLAKE3_BLOCK_LEN,
                                                 counter, block_flags);
     input = &input[BLAKE3_BLOCK_LEN];
     blocks -= 1;
     block_flags = flags;
   }
+
+  cudaMemcpyAsync(cv, d_cv, BLAKE3_KEY_LEN, cudaMemcpyDeviceToHost, 0);
   store_cv_words(out, cv);
+  cudaEventRecord(stop, 0);
+
+  checkCudaErrors(cudaEventDestroy(start));
+  checkCudaErrors(cudaEventDestroy(stop));
+  checkCudaErrors(cudaFree(d_in));
+  checkCudaErrors(cudaFree(d_cv));
+
+}
+
+int main(int argc, char *argv[]) {
+
 }
 
 #ifdef __cplusplus
