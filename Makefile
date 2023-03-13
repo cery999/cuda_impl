@@ -14,22 +14,22 @@ LIBRARIES :=
 
 all: build
 
-build: blake3-cuda
+build: blake3_cuda
 
-blake3-cuda.o:blake3-cuda.cu
+blake3_cuda.o:blake3_cuda.cu
 	$(EXEC) $(NVCC) $(INCLUDES) $(GENCODE_FLAGS) -o $@ -c $<
 
 
-blake3-cuda: blake3-cuda.o
+blake3_cuda: blake3_cuda.o
 	$(EXEC) $(NVCC) $(GENCODE_FLAGS) -o $@ $+ $(LIBRARIES)
 	
 run: build
-	$(EXEC) ./blake3-cuda
+	$(EXEC) ./blake3_cuda
 
 testrun: build
-	$(EXEC) ./blake3-cuda
+	$(EXEC) ./blake3_cuda
 
 clean:
-	rm -f blake3-cuda blake3-cuda.o
+	rm -f blake3_cuda blake3_cuda.o
 
 clobber: clean
