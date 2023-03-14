@@ -16,9 +16,11 @@ all: build
 
 build: blake3_cuda
 
-blake3_cuda.o:blake3_cuda.cu
+blake3_cuda.o: blake3_cuda.cu 
 	$(EXEC) $(NVCC) $(INCLUDES) $(GENCODE_FLAGS) -o $@ -c $<
 
+blake3_header.o: blake3_header.cu 
+	$(EXEC) $(NVCC) $(INCLUDES) $(GENCODE_FLAGS) -o $@ -c $<
 
 blake3_cuda: blake3_cuda.o
 	$(EXEC) $(NVCC) $(GENCODE_FLAGS) -o $@ $+ $(LIBRARIES)

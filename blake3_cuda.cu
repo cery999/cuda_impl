@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "./blake3_header.cuh"
 // CUDA runtime
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
@@ -16,25 +17,6 @@
 extern "C" {
 #endif
 
-#define BLAKE3_VERSION_STRING "1.3.3"
-#define BLAKE3_KEY_LEN 32
-#define BLAKE3_OUT_LEN 32
-#define BLAKE3_BLOCK_LEN 64
-#define BLAKE3_CHUNK_LEN 1024
-#define BLAKE3_MAX_DEPTH 54
-
-__constant__ uint32_t IV[8]{0x6A09E667UL, 0xBB67AE85UL, 0x3C6EF372UL,
-                            0xA54FF53AUL, 0x510E527FUL, 0x9B05688CUL,
-                            0x1F83D9ABUL, 0x5BE0CD19UL};
-__constant__ uint8_t MSG_SCHEDULE[7][16] = {
-    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
-    {2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8},
-    {3, 4, 10, 12, 13, 2, 7, 14, 6, 5, 9, 0, 11, 15, 8, 1},
-    {10, 7, 12, 9, 14, 3, 13, 15, 4, 0, 11, 2, 5, 8, 1, 6},
-    {12, 13, 9, 11, 15, 10, 14, 8, 7, 2, 5, 3, 0, 1, 6, 4},
-    {9, 14, 11, 5, 8, 12, 15, 1, 13, 3, 0, 10, 2, 6, 4, 7},
-    {11, 15, 5, 0, 1, 9, 8, 6, 14, 10, 2, 12, 3, 4, 7, 13},
-};
 __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
   return (w >> c) | (w << (32 - c));
 }
@@ -190,8 +172,8 @@ void blake3_compress_in_place_cuda(uint32_t cv[8],
   cudaMemcpyAsync(d_cv, cv, 8 * sizeof(uint32_t), cudaMemcpyHostToDevice, 0);
   cudaMemcpyAsync(d_block, block, BLAKE3_BLOCK_LEN, cudaMemcpyHostToDevice, 0);
 
-  blake3_compress_in_place_cuda_global_kernel<<<1, 1, 0, 0>>>(d_cv, d_block, block_len,
-                                                       counter, flags);
+  blake3_compress_in_place_cuda_global_kernel<<<1, 1, 0, 0>>>(
+      d_cv, d_block, block_len, counter, flags);
   cudaMemcpyAsync(cv, d_cv, 8 * sizeof(uint32_t), cudaMemcpyDeviceToHost, 0);
 
   cudaEventRecord(stop, 0);
@@ -353,6 +335,74 @@ void test1() {
   uint8_t out[32 * 31];
 
   blake3_hash_many_cuda(inputs, 31, 16, key, 0, true, 1, 2, 4, out);
+}
+
+void pre_allocate() {
+  checkCudaErrors(
+      cudaMalloc((void **)&pined_d_hasher, 102400 * sizeof(blake3_hasher)));
+}
+
+void post_free() { checkCudaErrors(cudaFree(pined_d_hasher)); }
+
+void test_init() {
+  checkCudaErrors(cudaProfilerStart());
+
+  blake3_hasher_init<<<2, 1024, 0, 0>>>(pined_d_hasher);
+  checkCudaErrors(cudaProfilerStop());
+}
+int main() {
+  pre_allocate();
+  /* test1(); */
+  test_init();
+  post_free();
+}
+
+__device__ void chunk_state_init(thread_block g, blake3_hasher *d_hash,
+                                 const uint32_t key[8], uint8_t flags) {
+  auto group_dim = g.group_dim();
+  auto group_idx = g.group_index();
+  auto idx = group_dim.x * group_idx.x + g.thread_rank();
+  blake3_chunk_state *chunk_state = &d_hash[idx].chunk;
+
+  memcpy(chunk_state->cv, key, BLAKE3_KEY_LEN);
+  chunk_state->chunk_counter = 0;
+  memset(chunk_state->buf, 0, BLAKE3_BLOCK_LEN);
+  chunk_state->buf_len = 0;
+  chunk_state->blocks_compressed = 0;
+  chunk_state->flags = flags;
+}
+
+__device__ void hasher_init_base(thread_block g, blake3_hasher *d_hash,
+                                 const uint32_t key[8], uint8_t flags) {
+  auto group_dim = g.group_dim();
+  auto group_idx = g.group_index();
+  auto idx = group_dim.x * group_idx.x + g.thread_rank();
+#pragma unroll
+  for (auto i = 0; i < 8; i++) {
+    d_hash[idx].key[i] = key[i];
+  }
+  chunk_state_init(g, d_hash, key, flags);
+  d_hash[idx].cv_stack_len = 0;
+}
+
+__global__ void blake3_hasher_init(blake3_hasher *d_hash) {
+  thread_block g = this_thread_block();
+  coalesced_group wrap = coalesced_threads();
+  auto lane = g.thread_rank();
+  auto thread_id_in_wrap = wrap.thread_rank();
+  uint32_t k[8];
+  if (thread_id_in_wrap == 0) {
+#pragma unroll
+    for (auto i = 0; i < 8; i++) {
+      /* printf("%d\n", g.thread_rank()); */
+      k[i] = IV[i];
+    }
+  }
+  for (auto i = 0; i < 8; i++) {
+    k[i] = wrap.shfl(k[i], 0);
+  }
+  __syncwarp();
+  hasher_init_base(g, d_hash, k, 0);
 }
 
 #ifdef __cplusplus
