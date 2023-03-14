@@ -192,12 +192,11 @@ blake3_compress_xof_cuda_kernel(uint32_t *cv, const uint8_t *block,
 
 #define SIMT_DEGREE 1024
 
-__global__ void
-blake3_hash_many_cuda_kernel(const uint8_t *d_inputs, size_t blocks,
-                             const uint32_t key[8], uint64_t counter,
-                             bool increment_counter, uint8_t flags,
-                             uint8_t flags_start, uint8_t flags_end,
-                             uint32_t *d_out, uint32_t *d_states) {
+__global__ void blake3_hash_many_cuda_kernel(
+    const uint8_t *d_inputs, size_t num_inputs, size_t blocks,
+    const uint32_t key[8], uint64_t counter, bool increment_counter,
+    uint8_t flags, uint8_t flags_start, uint8_t flags_end, uint32_t *d_out,
+    uint32_t *d_states) {
   auto id = blockIdx.x * blockDim.x + threadIdx.x;
   if (id < blocks) {
     uint32_t *state = d_states + 16 * id;
@@ -257,16 +256,13 @@ void blake3_hash_many_cuda(const uint8_t *const *inputs, size_t num_inputs,
                            uint8_t flags, uint8_t flags_start,
                            uint8_t flags_end, uint8_t *out) {
 
+  printf("in ffi cuda call \n");
   uint32_t *d_state, *d_in, *d_out, *d_cv;
-  checkCudaErrors(cudaMalloc((void **)&d_state, 64 * blocks));
+  checkCudaErrors(cudaMalloc((void **)&d_state, 64 * num_inputs));
   checkCudaErrors(
       cudaMalloc((void **)&d_in, BLAKE3_BLOCK_LEN * blocks * num_inputs));
-  checkCudaErrors(cudaMalloc((void **)&d_out, 64 * blocks));
+  checkCudaErrors(cudaMalloc((void **)&d_out, 64 * num_inputs));
   checkCudaErrors(cudaMalloc((void **)&d_cv, 32));
-
-  cudaMemcpyAsync(d_cv, key, BLAKE3_KEY_LEN, cudaMemcpyHostToDevice, 0);
-  cudaMemcpyAsync(d_in, inputs, blocks * BLAKE3_BLOCK_LEN,
-                  cudaMemcpyHostToDevice, 0);
 
   // create cuda event handles
   cudaEvent_t start, stop;
@@ -274,15 +270,22 @@ void blake3_hash_many_cuda(const uint8_t *const *inputs, size_t num_inputs,
   checkCudaErrors(cudaEventCreate(&stop));
   cudaEventRecord(start, 0);
   cudaMemcpyAsync(d_cv, key, BLAKE3_KEY_LEN, cudaMemcpyHostToDevice, 0);
-  cudaMemcpyAsync(d_in, inputs, BLAKE3_BLOCK_LEN * blocks,
+  cudaMemcpyAsync(d_in, inputs, blocks * BLAKE3_BLOCK_LEN * num_inputs,
                   cudaMemcpyHostToDevice, 0);
-  dim3 block(blocks / 1024, 1, 1);
-  dim3 thread(1024, 1, 1);
+
+  dim3 block, thread;
+  if (num_inputs < 1024) {
+    block = dim3(1, 1, 1);
+    thread = dim3(num_inputs, 1, 1);
+  } else {
+    block = dim3(ceil(num_inputs * 1.0 / 1024), 1, 1);
+    thread = dim3(1024, 1, 1);
+  }
   blake3_hash_many_cuda_kernel<<<block, thread, 0, 0>>>(
-      (uint8_t *)d_in, blocks, d_cv, counter, increment_counter, flags,
+      (uint8_t *)d_in, num_inputs ,blocks, d_cv, counter, increment_counter, flags,
       flags_start, flags_end, d_out, d_state);
 
-  cudaMemcpyAsync(out, d_out, 64 * blocks, cudaMemcpyDeviceToHost, 0);
+  cudaMemcpyAsync(out, d_out, 64 * num_inputs, cudaMemcpyDeviceToHost, 0);
   cudaEventRecord(stop, 0);
   checkCudaErrors(cudaEventDestroy(start));
   checkCudaErrors(cudaEventDestroy(stop));
@@ -386,7 +389,7 @@ void blake3_compress_xof_cuda(const uint32_t cv[8],
   checkCudaErrors(cudaFree(d_cv));
 }
 
-int main() {}
+/* int main() {} */
 
 #ifdef __cplusplus
 }
