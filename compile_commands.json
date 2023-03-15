@@ -1,0 +1,14 @@
+[
+    {
+        "arguments": [
+            "c++",
+            "-c",
+            "-I../c",
+            "-o",
+            "test_c",
+            "test_c.cpp"
+        ],
+        "directory": "/home/cery.zhai/BLAKE3/cuda_impl",
+        "file": "test_c.cpp"
+    }
+]

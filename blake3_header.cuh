@@ -45,6 +45,14 @@ typedef struct __align__(4) {
 }
 blake3_hasher;
 
+typedef struct __align__(4) {
+  uint32_t input_cv[8];
+  uint64_t counter;
+  uint8_t block[BLAKE3_BLOCK_LEN];
+  uint8_t block_len;
+  uint8_t flags;
+} output_t;
+
 __constant__ uint32_t __align__(4) IV[8]{
     0x6A09E667UL, 0xBB67AE85UL, 0x3C6EF372UL, 0xA54FF53AUL,
     0x510E527FUL, 0x9B05688CUL, 0x1F83D9ABUL, 0x5BE0CD19UL};
@@ -63,10 +71,13 @@ static blake3_hasher *pined_d_hasher;
 
 __global__ void blake3_hasher_init(blake3_hasher *d_hash);
 
-extern "C" void ffi_run_head_init(blake3_hasher *data);
+extern "C" void blake3_hasher_init_cuda(blake3_hasher *data, size_t N);
+extern "C" void blake3_hasher_reset_cuda(blake3_hasher *data, size_t N);
+extern "C" void blake3_hasher_update_cuda(blake3_hasher *data,
+                                          const uint8_t *const *inputs,
+                                          size_t *input_lens, size_t N);
 extern "C" void pre_allocate();
 extern "C" void post_free();
-
 
 #ifdef __cplusplus
 }
