@@ -5,16 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-// CUDA runtime
-#include <cuda_profiler_api.h>
-#include <cuda_runtime.h>
-
-// includes, project
 #include <cooperative_groups.h>
-#include <helper_cuda.h> // helper functions for CUDA error checking and initialization
-#include <helper_functions.h> // helper utility functions
 using namespace cooperative_groups;
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -70,6 +62,11 @@ __constant__ uint8_t MSG_SCHEDULE[7][16] = {
 static blake3_hasher *pined_d_hasher;
 
 __global__ void blake3_hasher_init(blake3_hasher *d_hash);
+
+extern "C" void ffi_run_head_init(blake3_hasher *data);
+extern "C" void pre_allocate();
+extern "C" void post_free();
+
 
 #ifdef __cplusplus
 }

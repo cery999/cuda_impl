@@ -13,6 +13,7 @@
 #include <helper_cuda.h> // helper functions for CUDA error checking and initialization
 #include <helper_functions.h> // helper utility functions
 
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -337,12 +338,12 @@ void test1() {
   blake3_hash_many_cuda(inputs, 31, 16, key, 0, true, 1, 2, 4, out);
 }
 
-void pre_allocate() {
+extern "C" void pre_allocate() {
   checkCudaErrors(
       cudaMalloc((void **)&pined_d_hasher, 102400 * sizeof(blake3_hasher)));
 }
 
-void post_free() { checkCudaErrors(cudaFree(pined_d_hasher)); }
+extern "C" void post_free() { checkCudaErrors(cudaFree(pined_d_hasher)); }
 
 void test_init() {
   checkCudaErrors(cudaProfilerStart());
@@ -350,12 +351,14 @@ void test_init() {
   blake3_hasher_init<<<2, 1024, 0, 0>>>(pined_d_hasher);
   checkCudaErrors(cudaProfilerStop());
 }
-int main() {
-  pre_allocate();
-  /* test1(); */
-  test_init();
-  post_free();
-}
+
+/* int main() { */
+/*   pre_allocate(); */
+/*   /1* test1(); *1/ */
+/*   test_init(); */
+/*   post_free(); */
+/* } */
+
 
 __device__ void chunk_state_init(thread_block g, blake3_hasher *d_hash,
                                  const uint32_t key[8], uint8_t flags) {
@@ -404,6 +407,8 @@ __global__ void blake3_hasher_init(blake3_hasher *d_hash) {
   __syncwarp();
   hasher_init_base(g, d_hash, k, 0);
 }
+
+
 
 #ifdef __cplusplus
 }
