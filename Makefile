@@ -5,7 +5,7 @@ NVCC          := $(CUDA_PATH)/bin/nvcc -ccbin $(HOST_COMPILER)
 # internal flags
 CCFLAGS     :=
 LDFLAGS     :=
-GENCODE_FLAGS := -gencode arch=compute_75,code=compute_75
+GENCODE_FLAGS := -gencode arch=compute_75,code=compute_75 -rdc=true
 
 
 INCLUDES  := -I/home/cery/cuda-samples-master/Common -I../c/

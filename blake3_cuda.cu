@@ -17,6 +17,21 @@
 extern "C" {
 #endif
 
+#define MAX_SIMD_DEGREE_OR_2 1024
+#define MAX_SIMD_DEGREE 1024
+
+__device__ void chunk_state_reset(blake3_chunk_state *self,
+                                  const uint32_t key[8],
+                                  uint64_t chunk_counter);
+__device__ uint8_t chunk_state_maybe_start_flag(const blake3_chunk_state *self);
+__global__ void blake3_hasher_reset(blake3_hasher *d_hash, size_t N);
+__global__ void blake3_hasher_init(blake3_hasher *d_hash, size_t N);
+
+__device__ unsigned int highest_one(uint64_t x) { return 63 ^ __clzll(x); }
+__device__ uint64_t round_down_to_power_of_2(uint64_t x) {
+  return 1ULL << highest_one(x | 1);
+}
+
 __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
   return (w >> c) | (w << (32 - c));
 }
@@ -187,35 +202,39 @@ void blake3_compress_in_place_cuda(uint32_t cv[8],
   checkCudaErrors(cudaProfilerStop());
 }
 
-__global__ void
-blake3_hash_many_cuda_kernel(const uint8_t *d_inputs, uint32_t *d_cv,
-                             uint8_t *d_out, size_t num_inputs, size_t blocks,
-                             const uint32_t d_key[8], uint64_t counter,
-                             bool increment_counter, uint8_t flags,
-                             uint8_t flags_start, uint8_t flags_end) {
-  auto id = blockIdx.x * blockDim.x + threadIdx.x;
-  if (id < num_inputs) {
-    uint32_t *cv = d_cv + id * 8;
-    uint8_t *out = d_out + id * 32;
-    const uint8_t *input = d_inputs + id * blocks * BLAKE3_BLOCK_LEN;
-    for (auto i = 0; i < 8; i++) {
-      cv[i] = d_key[i];
+__device__ void hash_one_cuda(const uint8_t *input, size_t blocks,
+                              const uint32_t key[8], uint64_t counter,
+                              uint8_t flags, uint8_t flags_start,
+                              uint8_t flags_end, uint8_t out[BLAKE3_OUT_LEN]) {
+  uint32_t cv[8];
+  memcpy(cv, key, BLAKE3_KEY_LEN);
+  uint8_t block_flags = flags | flags_start;
+  while (blocks > 0) {
+    if (blocks == 1) {
+      block_flags |= flags_end;
     }
+    blake3_compress_in_place_cuda_kernel(cv, input, BLAKE3_BLOCK_LEN, counter,
+                                         block_flags);
+    input = &input[BLAKE3_BLOCK_LEN];
+    blocks -= 1;
+    block_flags = flags;
+  }
+  store_cv_words(out, cv);
+}
+
+__global__ void blake3_hash_many_cuda_kernel(
+    const uint8_t *inputs, size_t num_inputs, size_t blocks,
+    const uint32_t key[8], uint64_t counter, bool increment_counter,
+    uint8_t flags, uint8_t flags_start, uint8_t flags_end, uint8_t *out) {
+
+  auto idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < num_inputs) {
     if (increment_counter) {
-      counter += id;
+      counter += idx;
     }
-    uint8_t block_flags = flags | flags_start;
-    while (blocks > 0) {
-      if (blocks == 1) {
-        block_flags |= flags_end;
-      }
-      blake3_compress_in_place_cuda_kernel(cv, input, BLAKE3_BLOCK_LEN, counter,
-                                           block_flags);
-      input = &input[BLAKE3_BLOCK_LEN];
-      blocks -= 1;
-      block_flags = flags;
-    }
-    store_cv_words(out, cv);
+    auto thread_inputs = inputs + idx * BLAKE3_CHUNK_LEN;
+    hash_one_cuda(thread_inputs, blocks, key, counter, flags, flags_start,
+                  flags_end, out + idx * BLAKE3_OUT_LEN);
   }
 }
 
@@ -224,12 +243,13 @@ void blake3_hash_many_cuda(const uint8_t *const *inputs, size_t num_inputs,
                            uint64_t counter, bool increment_counter,
                            uint8_t flags, uint8_t flags_start,
                            uint8_t flags_end, uint8_t *out) {
-  uint32_t *d_cv, *d_key;
+  uint32_t *d_key;
   uint8_t *d_out, *d_in;
+  size_t pitch;
+  cudaMallocPitch(&d_in, &pitch, BLAKE3_CHUNK_LEN, num_inputs);
   checkCudaErrors(
       cudaMalloc((void **)&d_in, BLAKE3_BLOCK_LEN * blocks * num_inputs));
   checkCudaErrors(cudaMalloc((void **)&d_out, 32 * num_inputs));
-  checkCudaErrors(cudaMalloc((void **)&d_cv, 32 * num_inputs));
   checkCudaErrors(cudaMalloc((void **)&d_key, 32));
 
   // create cuda event handles
@@ -237,12 +257,9 @@ void blake3_hash_many_cuda(const uint8_t *const *inputs, size_t num_inputs,
   checkCudaErrors(cudaEventCreate(&start));
   checkCudaErrors(cudaEventCreate(&stop));
   cudaEventRecord(start, 0);
-  auto offset = 0;
-  for (auto i = 0; i < num_inputs; i++) {
-    cudaMemcpyAsync(d_in + offset, inputs[i], blocks * BLAKE3_BLOCK_LEN,
-                    cudaMemcpyHostToDevice, 0);
-    offset += blocks * BLAKE3_BLOCK_LEN;
-  }
+
+  cudaMemcpy2DAsync(d_in, pitch, inputs, pitch, BLAKE3_CHUNK_LEN, num_inputs,
+                    cudaMemcpyHostToDevice);
   cudaMemcpyAsync(d_key, key, BLAKE3_KEY_LEN, cudaMemcpyHostToDevice, 0);
 
   dim3 block, thread;
@@ -255,8 +272,8 @@ void blake3_hash_many_cuda(const uint8_t *const *inputs, size_t num_inputs,
   }
 
   blake3_hash_many_cuda_kernel<<<block, thread, 0, 0>>>(
-      d_in, d_cv, d_out, num_inputs, blocks, d_key, counter, increment_counter,
-      flags, flags_start, flags_end);
+      d_in, num_inputs, blocks, d_key, counter, increment_counter, flags,
+      flags_start, flags_end, d_out);
   cudaMemcpyAsync(out, d_out, 32 * num_inputs, cudaMemcpyDeviceToHost, 0);
   cudaEventRecord(stop, 0);
 
@@ -265,7 +282,6 @@ void blake3_hash_many_cuda(const uint8_t *const *inputs, size_t num_inputs,
   checkCudaErrors(cudaEventDestroy(stop));
 
   // free
-  checkCudaErrors(cudaFree(d_cv));
   checkCudaErrors(cudaFree(d_in));
   checkCudaErrors(cudaFree(d_out));
 }
@@ -345,17 +361,29 @@ extern "C" void post_free() { checkCudaErrors(cudaFree(pined_d_hasher)); }
 
 extern "C" void blake3_hasher_init_cuda(blake3_hasher *data, size_t N) {
   if (N < 1024) {
-    blake3_hasher_init<<<1, N, 0, 0>>>(pined_d_hasher);
+    blake3_hasher_init<<<1, N, 0, 0>>>(pined_d_hasher, N);
   } else {
-    blake3_hasher_init<<<ceil(N / 1024), 1024, 0, 0>>>(pined_d_hasher);
+    blake3_hasher_init<<<ceil(N / 1024), 1024, 0, 0>>>(pined_d_hasher, N);
+  }
+}
+
+__global__ void blake3_hasher_reset(blake3_hasher *d_hash, size_t N) {
+  thread_block g = this_thread_block();
+  auto group_dim = g.group_dim();
+  auto group_idx = g.group_index();
+  auto idx = group_idx.x * group_dim.x + g.thread_rank();
+  if (idx < N) {
+    blake3_hasher *self = &d_hash[idx];
+    chunk_state_reset(&self->chunk, self->key, 0);
+    self->cv_stack_len = 0;
   }
 }
 
 extern "C" void blake3_hasher_reset_cuda(blake3_hasher *data, size_t N) {
   if (N < 1024) {
-    blake3_hasher_reset<<<1, N, 0, 0>>>(pined_d_hasher);
+    blake3_hasher_reset<<<1, N, 0, 0>>>(pined_d_hasher, N);
   } else {
-    blake3_hasher_reset<<<ceil(N / 1024), 1024, 0, 0>>>(pined_d_hasher);
+    blake3_hasher_reset<<<ceil(N / 1024), 1024, 0, 0>>>(pined_d_hasher, N);
   }
 }
 
@@ -366,38 +394,30 @@ extern "C" void blake3_hasher_reset_cuda(blake3_hasher *data, size_t N) {
 /*   post_free(); */
 /* } */
 
-__device__ void chunk_state_init(thread_block g, blake3_hasher *d_hash,
+__device__ void chunk_state_init(blake3_chunk_state *self,
                                  const uint32_t key[8], uint8_t flags) {
-  auto group_dim = g.group_dim();
-  auto group_idx = g.group_index();
-  auto idx = group_dim.x * group_idx.x + g.thread_rank();
-  blake3_chunk_state *chunk_state = &d_hash[idx].chunk;
-
-  memcpy(chunk_state->cv, key, BLAKE3_KEY_LEN);
-  chunk_state->chunk_counter = 0;
-  memset(chunk_state->buf, 0, BLAKE3_BLOCK_LEN);
-  chunk_state->buf_len = 0;
-  chunk_state->blocks_compressed = 0;
-  chunk_state->flags = flags;
+  memcpy(self->cv, key, BLAKE3_KEY_LEN);
+  self->chunk_counter = 0;
+  memset(self->buf, 0, BLAKE3_BLOCK_LEN);
+  self->buf_len = 0;
+  self->blocks_compressed = 0;
+  self->flags = flags;
 }
 
-__device__ void hasher_init_base(thread_block g, blake3_hasher *d_hash,
-                                 const uint32_t key[8], uint8_t flags) {
-  auto group_dim = g.group_dim();
-  auto group_idx = g.group_index();
-  auto idx = group_dim.x * group_idx.x + g.thread_rank();
-#pragma unroll
-  for (auto i = 0; i < 8; i++) {
-    d_hash[idx].key[i] = key[i];
-  }
-  chunk_state_init(g, d_hash, key, flags);
-  d_hash[idx].cv_stack_len = 0;
+__device__ void hasher_init_base(blake3_hasher *self, const uint32_t key[8],
+                                 uint8_t flags) {
+  memcpy(self->key, key, BLAKE3_KEY_LEN);
+  chunk_state_init(&self->chunk, key, flags);
+  self->cv_stack_len = 0;
 }
 
 __global__ void blake3_hasher_init(blake3_hasher *d_hash, size_t N) {
   thread_block g = this_thread_block();
+  auto group_dim = g.group_dim();
+  auto group_idx = g.group_index();
+  auto idx = group_idx.x * group_dim.x + g.thread_rank();
+
   coalesced_group wrap = coalesced_threads();
-  auto lane = g.thread_rank();
   auto thread_id_in_wrap = wrap.thread_rank();
   uint32_t k[8];
   if (thread_id_in_wrap == 0) {
@@ -411,35 +431,27 @@ __global__ void blake3_hasher_init(blake3_hasher *d_hash, size_t N) {
     k[i] = wrap.shfl(k[i], 0);
   }
   __syncwarp();
-  hasher_init_base(g, d_hash, k, 0);
+  if (idx < N) {
+    blake3_hasher *self = &d_hash[idx];
+    hasher_init_base(self, IV, 0);
+  }
 }
 
-__device__ void
-chunk_state_reset(thread_block g,
-                  blake3_hasher *d_hash uint64_t chunk_counter) {
+__device__ void chunk_state_reset(blake3_chunk_state *self,
+                                  const uint32_t key[8],
+                                  uint64_t chunk_counter) {
+  memcpy(self->cv, key, BLAKE3_KEY_LEN);
+  self->chunk_counter = chunk_counter;
+  self->blocks_compressed = 0;
+  memset(self->buf, 0, BLAKE3_BLOCK_LEN);
+  self->buf_len = 0;
+}
+
+__device__ size_t chunk_state_len(thread_block g, const blake3_hasher *d_hash) {
   auto group_dim = g.group_dim();
   auto group_idx = g.group_index();
   auto idx = group_dim.x * group_idx.x + g.thread_rank();
-  auto blake3_chunk_state *d_cs = &d_hash[idx];
-  uint32_t *key_ptr = d_hash[idx].key;
-  memcpy(d_cs->cv, key_ptr, BLAKE3_KEY_LEN);
-  d_cs->chunk_counter = chunk_counter;
-  d_cs->blocks_compressed = 0;
-  memset(d_cs->buf, 0, BLAKE3_BLOCK_LEN);
-  d_cs->buf_len = 0;
-}
-
-__global__ void blake3_hasher_reset(blake3_haser *d_hash) {
-  thread_block g = this_thread_block();
-  chunk_state_reset(g, d_hash, 0);
-}
-
-__device__ size_t chunk_state_len(cooperative_groups g,
-                                  const blake3_hasher *d_hash) {
-  auto group_dim = g.group_dim();
-  auto group_idx = g.group_index();
-  auto idx = group_dim.x * group_idx.x + g.thread_rank();
-  const blake3_chunk_state *self = d_hash[idx].chunk;
+  const blake3_chunk_state *self = &d_hash[idx].chunk;
   return (BLAKE3_BLOCK_LEN * (size_t)self->blocks_compressed) +
          ((size_t)self->buf_len);
 }
@@ -547,6 +559,173 @@ __device__ void hasher_push_cv(blake3_hasher *self,
   self->cv_stack_len += 1;
 }
 
+__device__ size_t compress_chunks_parallel(const uint8_t *input,
+                                           size_t input_len,
+                                           const uint32_t key[8],
+                                           uint64_t chunk_counter,
+                                           uint8_t flags, uint8_t *out) {
+#if defined(BLAKE3_TESTING)
+  assert(0 < input_len);
+  // shared max 48kB
+  assert(input_len <= MAX_SIMD_DEGREE * BLAKE3_CHUNK_LEN);
+#endif
+  auto num_inputs = input_len / BLAKE3_CHUNK_LEN;
+  if (num_inputs > 0) {
+    blake3_hash_many_cuda_kernel<<<num_inputs, MAX_SIMD_DEGREE>>>(
+        input, num_inputs, BLAKE3_CHUNK_LEN / BLAKE3_BLOCK_LEN, key,
+        chunk_counter, true, flags, CHUNK_START, CHUNK_END, out);
+  } else {
+    blake3_hash_many_cuda_kernel<<<1, num_inputs>>>(
+        input, num_inputs, BLAKE3_CHUNK_LEN / BLAKE3_BLOCK_LEN, key,
+        chunk_counter, true, flags, CHUNK_START, CHUNK_END, out);
+  }
+
+  auto num_inputs_left = input_len % BLAKE3_CHUNK_LEN;
+  if (num_inputs_left) {
+    uint64_t counter = chunk_counter + (uint64_t)num_inputs;
+    blake3_chunk_state chunk_state;
+    chunk_state_init(&chunk_state, key, flags);
+    chunk_state.chunk_counter = counter;
+    chunk_state_update(&chunk_state, &input[num_inputs * BLAKE3_CHUNK_LEN],
+                       num_inputs_left);
+    output_t output = chunk_state_output(&chunk_state);
+    output_chaining_value(&output, &out[num_inputs * BLAKE3_OUT_LEN]);
+    return num_inputs + 1;
+  } else {
+    return num_inputs;
+  }
+}
+
+__device__ size_t left_len(size_t content_len) {
+  // Subtract 1 to reserve at least one byte for the right side. content_len
+  // should always be greater than BLAKE3_CHUNK_LEN.
+  size_t full_chunks = (content_len - 1) / BLAKE3_CHUNK_LEN;
+  return round_down_to_power_of_2(full_chunks) * BLAKE3_CHUNK_LEN;
+}
+
+__device__ size_t compress_parents_parallel(
+    const uint8_t *child_chaining_values, size_t num_chaining_values,
+    const uint32_t key[8], uint8_t flags, uint8_t *out) {
+#if defined(BLAKE3_TESTING)
+  assert(2 <= num_chaining_values);
+  assert(num_chaining_values <= 2 * MAX_SIMD_DEGREE_OR_2);
+#endif
+
+  const uint8_t *parents_array[MAX_SIMD_DEGREE_OR_2];
+  size_t parents_array_len = 0;
+  while (num_chaining_values - (2 * parents_array_len) >= 2) {
+    parents_array[parents_array_len] =
+        &child_chaining_values[2 * parents_array_len * BLAKE3_OUT_LEN];
+    parents_array_len += 1;
+  }
+
+  blake3_hash_many_cuda_kernel<<<1, parents_array_len>>>(
+      child_chaining_values, parents_array_len, 1, key,
+      0, // Parents always use counter 0.
+      false, flags | PARENT,
+      0, // Parents have no start flags.
+      0, // Parents have no end flags.
+      out);
+
+  // If there's an odd child left over, it becomes an output.
+  if (num_chaining_values > 2 * parents_array_len) {
+    memcpy(&out[parents_array_len * BLAKE3_OUT_LEN],
+           &child_chaining_values[2 * parents_array_len * BLAKE3_OUT_LEN],
+           BLAKE3_OUT_LEN);
+    return parents_array_len + 1;
+  } else {
+    return parents_array_len;
+  }
+}
+
+__device__ size_t blake3_compress_subtree_wide(const uint8_t *input,
+                                               size_t input_len,
+                                               const uint32_t key[8],
+                                               uint64_t chunk_counter,
+                                               uint8_t flags, uint8_t *out) {
+  // Note that the single chunk case does *not* bump the SIMD degree up to 2
+  // when it is 1. If this implementation adds multi-threading in the future,
+  // this gives us the option of multi-threading even the 2-chunk case, which
+  // can help performance on smaller platforms.
+  if (input_len <= 1024 * BLAKE3_CHUNK_LEN) {
+    return compress_chunks_parallel(input, input_len, key, chunk_counter, flags,
+                                    out);
+  }
+
+  // With more than simd_degree chunks, we need to recurse. Start by dividing
+  // the input into left and right subtrees. (Note that this is only optimal
+  // as long as the SIMD degree is a power of 2. If we ever get a SIMD degree
+  // of 3 or something, we'll need a more complicated strategy.)
+  size_t left_input_len = left_len(input_len);
+  size_t right_input_len = input_len - left_input_len;
+  const uint8_t *right_input = &input[left_input_len];
+  uint64_t right_chunk_counter =
+      chunk_counter + (uint64_t)(left_input_len / BLAKE3_CHUNK_LEN);
+
+  // Make space for the child outputs. Here we use MAX_SIMD_DEGREE_OR_2 to
+  // account for the special case of returning 2 outputs when the SIMD degree
+  // is 1.
+  uint8_t cv_array[2 * MAX_SIMD_DEGREE_OR_2 * BLAKE3_OUT_LEN];
+  size_t degree = MAX_SIMD_DEGREE;
+  if (left_input_len > BLAKE3_CHUNK_LEN && degree == 1) {
+    // The special case: We always use a degree of at least two, to make
+    // sure there are two outputs. Except, as noted above, at the chunk
+    // level, where we allow degree=1. (Note that the 1-chunk-input case is
+    // a different codepath.)
+    degree = 2;
+  }
+  uint8_t *right_cvs = &cv_array[degree * BLAKE3_OUT_LEN];
+
+  // Recurse! If this implementation adds multi-threading support in the
+  // future, this is where it will go.
+  size_t left_n = blake3_compress_subtree_wide(input, left_input_len, key,
+                                               chunk_counter, flags, cv_array);
+  size_t right_n = blake3_compress_subtree_wide(
+      right_input, right_input_len, key, right_chunk_counter, flags, right_cvs);
+
+  // The special case again. If simd_degree=1, then we'll have left_n=1 and
+  // right_n=1. Rather than compressing them into a single output, return
+  // them directly, to make sure we always have at least two outputs.
+  if (left_n == 1) {
+    memcpy(out, cv_array, 2 * BLAKE3_OUT_LEN);
+    return 2;
+  }
+
+  // Otherwise, do one layer of parent node compression.
+  size_t num_chaining_values = left_n + right_n;
+  return compress_parents_parallel(cv_array, num_chaining_values, key, flags,
+                                   out);
+}
+
+__device__ void compress_subtree_to_parent_node(
+    const uint8_t *input, size_t input_len, const uint32_t key[8],
+    uint64_t chunk_counter, uint8_t flags, uint8_t out[2 * BLAKE3_OUT_LEN]) {
+#if defined(BLAKE3_TESTING)
+  assert(input_len > BLAKE3_CHUNK_LEN);
+#endif
+
+  uint8_t cv_array[MAX_SIMD_DEGREE_OR_2 * BLAKE3_OUT_LEN];
+  size_t num_cvs = blake3_compress_subtree_wide(input, input_len, key,
+                                                chunk_counter, flags, cv_array);
+  assert(num_cvs <= MAX_SIMD_DEGREE_OR_2);
+
+  // If MAX_SIMD_DEGREE is greater than 2 and there's enough input,
+  // compress_subtree_wide() returns more than 2 chaining values. Condense
+  // them into 2 by forming parent nodes repeatedly.
+  uint8_t out_array[MAX_SIMD_DEGREE_OR_2 * BLAKE3_OUT_LEN / 2];
+  // The second half of this loop condition is always true, and we just
+  // asserted it above. But GCC can't tell that it's always true, and if NDEBUG
+  // is set on platforms where MAX_SIMD_DEGREE_OR_2 == 2, GCC emits spurious
+  // warnings here. GCC 8.5 is particularly sensitive, so if you're changing
+  // this code, test it against that version.
+  while (num_cvs > 2 && num_cvs <= MAX_SIMD_DEGREE_OR_2) {
+    num_cvs =
+        compress_parents_parallel(cv_array, num_cvs, key, flags, out_array);
+    memcpy(cv_array, out_array, num_cvs * BLAKE3_OUT_LEN);
+  }
+  memcpy(out, cv_array, 2 * BLAKE3_OUT_LEN);
+}
+
 __global__ void blake3_hasher_update(blake3_hasher *d_hash, const void *d_input,
                                      size_t *input_lens,
                                      size_t *input_partial_sum_lens, size_t N) {
@@ -554,26 +733,28 @@ __global__ void blake3_hasher_update(blake3_hasher *d_hash, const void *d_input,
   // to memcpy. This comes up in practice with things like:
   //   std::vector<uint8_t> v;
   //   blake3_hasher_update(&hasher, v.data(), v.size());
+  thread_block g = this_thread_block();
   auto group_dim = g.group_dim();
   auto group_idx = g.group_index();
   auto idx = group_dim.x * group_idx.x + g.thread_rank();
   if (idx < N) {
-    auto input_len = d_input_len[idx];
+    auto input_len = input_lens[idx];
     if (input_len == 0) {
       return;
     }
-    const void *input = d_input + input_partial_sum_lens[idx];
+    const uint8_t *input = (uint8_t *)d_input + input_partial_sum_lens[idx];
     const uint8_t *input_bytes = (const uint8_t *)input;
+    blake3_chunk_state *this_chunk = &d_hash[idx].chunk;
+    blake3_hasher *self = &d_hash[idx];
 
     // If we have some partial chunk bytes in the internal chunk_state, we need
     // to finish that chunk first.
-    size_t curren_hash_len = chunk_state_len(g, d_hash);
-    if (hash_len > 0) {
-      size_t take = BLAKE3_CHUNK_LEN - curren_hash_len;
+    size_t current_hash_len = chunk_state_len(g, d_hash);
+    if (current_hash_len > 0) {
+      size_t take = BLAKE3_CHUNK_LEN - current_hash_len;
       if (take > input_len) {
         take = input_len;
       }
-      blake3_chunk_state *this_chunk = d_hash[idx].chunk;
       chunk_state_update(this_chunk, input_bytes, take);
       input_bytes += take;
       input_len -= take;
@@ -583,8 +764,9 @@ __global__ void blake3_hasher_update(blake3_hasher *d_hash, const void *d_input,
         output_t output = chunk_state_output(this_chunk);
         uint8_t chunk_cv[32];
         output_chaining_value(&output, chunk_cv);
-        hasher_push_cv(&d_hash[idx], chunk_cv, this_chunk.chunk_counter);
-        chunk_state_reset(g, d_hash,this_chunk->chunk_counter + 1);
+        hasher_push_cv(self, chunk_cv, self->chunk.chunk_counter);
+        chunk_state_reset(&self->chunk, self->key,
+                          self->chunk.chunk_counter + 1);
       } else {
         return;
       }
@@ -606,7 +788,7 @@ __global__ void blake3_hasher_update(blake3_hasher *d_hash, const void *d_input,
     // evenly divide what we already have, this part runs in a loop.
     while (input_len > BLAKE3_CHUNK_LEN) {
       size_t subtree_len = round_down_to_power_of_2(input_len);
-      uint64_t count_so_far = self->chunk.chunk_counter * BLAKE3_CHUNK_LEN;
+      uint64_t count_so_far = this_chunk->chunk_counter * BLAKE3_CHUNK_LEN;
       // Shrink the subtree_len until it evenly divides the count so far. We
       // know that subtree_len itself is a power of 2, so we can use a
       // bitmasking trick instead of an actual remainder operation. (Note that
@@ -632,7 +814,7 @@ __global__ void blake3_hasher_update(blake3_hasher *d_hash, const void *d_input,
       if (subtree_len <= BLAKE3_CHUNK_LEN) {
         blake3_chunk_state chunk_state;
         chunk_state_init(&chunk_state, self->key, self->chunk.flags);
-        chunk_state.chunk_counter = self->chunk.chunk_counter;
+        chunk_state.chunk_counter = this_chunk->chunk_counter;
         chunk_state_update(&chunk_state, input_bytes, subtree_len);
         output_t output = chunk_state_output(&chunk_state);
         uint8_t cv[BLAKE3_OUT_LEN];

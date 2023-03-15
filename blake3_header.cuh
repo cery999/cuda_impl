@@ -18,6 +18,14 @@ extern "C" {
 #define BLAKE3_CHUNK_LEN 1024
 #define BLAKE3_MAX_DEPTH 54
 
+// internal flags
+enum blake3_flags {
+  CHUNK_START = 1 << 0,
+  CHUNK_END = 1 << 1,
+  PARENT = 1 << 2,
+  ROOT = 1 << 3,
+};
+
 // This struct is a private implementation detail. It has to be here because
 // it's part of blake3_hasher below.
 // 8*4+8+64+3 = 107
@@ -51,7 +59,8 @@ typedef struct __align__(4) {
   uint8_t block[BLAKE3_BLOCK_LEN];
   uint8_t block_len;
   uint8_t flags;
-} output_t;
+}
+output_t;
 
 __constant__ uint32_t __align__(4) IV[8]{
     0x6A09E667UL, 0xBB67AE85UL, 0x3C6EF372UL, 0xA54FF53AUL,
@@ -68,8 +77,6 @@ __constant__ uint8_t MSG_SCHEDULE[7][16] = {
 };
 
 static blake3_hasher *pined_d_hasher;
-
-__global__ void blake3_hasher_init(blake3_hasher *d_hash);
 
 extern "C" void blake3_hasher_init_cuda(blake3_hasher *data, size_t N);
 extern "C" void blake3_hasher_reset_cuda(blake3_hasher *data, size_t N);

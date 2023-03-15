@@ -1,14 +1,19 @@
 [
     {
         "arguments": [
-            "c++",
+            "/usr/local/cuda/bin/nvcc",
             "-c",
-            "-I../c",
+            "-ccbin",
+            "g++",
+            "-I/home/cery/cuda-samples-master/Common",
+            "-I../c/",
+            "-gencode",
+            "arch=compute_75,code=compute_75",
             "-o",
-            "test_c",
-            "test_c.cpp"
+            "blake3_cuda.o",
+            "blake3_cuda.cu"
         ],
-        "directory": "/home/cery.zhai/BLAKE3/cuda_impl",
-        "file": "test_c.cpp"
+        "directory": "/home/cery/BLAKE3/cuda_impl",
+        "file": "blake3_cuda.cu"
     }
 ]
