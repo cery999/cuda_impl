@@ -40,8 +40,8 @@ __global__ special_launch(uint8_t *header, size_t start, size_t end,
 void special_cuda_target(uint8_t *header, size_t start, size_t end,
                          size_t stride, uint8_t target[32]) {
   checkCudaErrors(cudaProfilerStart());
-  cudaMemcpyAsync(pined_inp, header, INPUT_LEN * , cudaMemcpyHostToDevice, 0);
-  cudaMemcpyAsync(pined_target, header, INPUT_LEN, cudaMemcpyHostToDevice, 0);
+  cudaMemcpyAsync(pined_inp, header, INPUT_LEN , cudaMemcpyHostToDevice, 0);
+  cudaMemcpyAsync(pined_target, header, BLAKE3_OUT_LEN, cudaMemcpyHostToDevice, 0);
 
   checkCudaErrors(cudaProfilerStop());
 }
