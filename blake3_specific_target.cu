@@ -29,6 +29,8 @@ extern "C" {
 #define BLAKE3_MAX_DEPTH 54
 
 #define INPUT_LEN 180
+#define PARALLEL_DEGREE 102400
+
 // internal flags
 enum blake3_flags {
   CHUNK_START = 1 << 0,
@@ -181,59 +183,82 @@ __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
   } while (0);
 
 __global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
-                               size_t stride, uint8_t *d_target) {
+                               size_t stride, uint8_t *d_target, uint8_t *out,
+                               uint64_t *random_idx, bool *found) {
   auto idx = blockIdx.x * blockDim.x + threadIdx.x;
-  // init chunk state
-  // buf_len = 0, blocks_compressed = 0, flag = 0;
-  uint32_t CV[8] = {0x6A09E667UL, 0xBB67AE85UL, 0x3C6EF372UL,
-                    0xA54FF53AUL, 0x510E527FUL, 0x9B05688CUL,
-                    0x1F83D9ABUL, 0x5BE0CD19UL}; // cv
-  uint32_t M[16] = {0};                          // message blocks
-  uint32_t S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, SA, SB, SC, SD, SE,
-      SF; // the state var
+  if (idx < end) {
+    // init chunk state
+    // buf_len = 0, blocks_compressed = 0, flag = 0;
+    uint32_t CV[8] = {0x6A09E667UL, 0xBB67AE85UL, 0x3C6EF372UL,
+                      0xA54FF53AUL, 0x510E527FUL, 0x9B05688CUL,
+                      0x1F83D9ABUL, 0x5BE0CD19UL}; // cv
+    uint32_t M[16] = {0};                          // message blocks
+    uint32_t S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, SA, SB, SC, SD, SE,
+        SF; // the state var
 
-  uint64_t random_i = start + idx * stride; // parallel random message with i
+    uint64_t random_i = start + idx * stride; // parallel random message with i
 
-  // process first block with 64B with 180 - 64 remain
-  uint32_t h_random_i = random_i >> 32, low_random_i = (uint32_t)(random_i);
-  M[0] = __byte_perm(low_random_i, h_random_i, 0x0123);
-  M[1] = __byte_perm(low_random_i, h_random_i, 0x4567);
-  d_header += 8;
-  memcpy(&M[2], d_header, 56); // copy 8 + 56 = 64B
-  d_header += 56;
+    // process first block with 64B with 180 - 64 remain
+    uint32_t h_random_i = random_i >> 32, low_random_i = (uint32_t)(random_i);
+    M[0] = __byte_perm(low_random_i, h_random_i, 0x0123);
+    M[1] = __byte_perm(low_random_i, h_random_i, 0x4567);
+    d_header += 8;
+    memcpy(&M[2], d_header, 56); // copy 8 + 56 = 64B
+    d_header += 56;
 
-  // init states
-  INIT(BLAKE3_BLOCK_LEN, CHUNK_START);
-  // round 0 - 6
-  ROUND;
-  // update chain value in place
-  UPDAET;
+    // init states
+    INIT(BLAKE3_BLOCK_LEN, CHUNK_START);
+    // round 0 - 6
+    ROUND;
+    // update chain value in place
+    UPDAET;
 
-  // blocks_compressed = 1 remain 116
-  memcpy(&M[0], d_header, BLAKE3_BLOCK_LEN); // copy 64B
-  d_header += BLAKE3_BLOCK_LEN;
+    // blocks_compressed = 1 remain 116
+    memcpy(&M[0], d_header, BLAKE3_BLOCK_LEN); // copy 64B
+    d_header += BLAKE3_BLOCK_LEN;
 
-  // init states
-  INIT(BLAKE3_BLOCK_LEN, 0);
-  // round 0 - 6
-  ROUND;
-  // update chain value in place
-  UPDAET;
-  // blocks_compressed = 2 remain 52 do final
+    // init states
+    INIT(BLAKE3_BLOCK_LEN, 0);
+    // round 0 - 6
+    ROUND;
+    // update chain value in place
+    UPDAET;
+    // blocks_compressed = 2 remain 52 do final
 
-  memcpy(&M[0], d_header, 52);
-  memset(&M[0] + 52, 0, BLAKE3_BLOCK_LEN - 52);
-  d_header += 52; // remain 0
+    memcpy(&M[0], d_header, 52);
+    memset(&M[0] + 52, 0, BLAKE3_BLOCK_LEN - 52);
+    d_header += 52; // remain 0
 
-  // init states
-  INIT(buf_len, CHUNK_END | ROOT);
-  // round 0 - 6
-  ROUND;
-  UPDAET;
-  // done output will be chain value
+    // init states
+    INIT(buf_len, CHUNK_END | ROOT);
+    // round 0 - 6
+    ROUND;
+    UPDAET;
+    // done output will be chain value
 
+    // for debug
+    uint32_t *self_out = out + idx * 8;
+    self_out[0] = CV[0];
+    self_out[1] = CV[1];
+    self_out[2] = CV[2];
+    self_out[3] = CV[3];
+    self_out[4] = CV[4];
+    self_out[5] = CV[5];
+    self_out[6] = CV[6];
+    self_out[7] = CV[7];
 
-
+    uint8_t *out_cv = (uint8_t *)CV;
+#pragma unroll
+    for (auto i = 0; i < 8; i++) {
+      if (out_cv[i] > d_target[i]) {
+        return;
+      }
+    }
+    
+    // match i
+    random_idx = random_i;
+    found = true;
+  }
 }
 
 void special_cuda_target(uint8_t *header, size_t start, size_t end,
@@ -242,6 +267,8 @@ void special_cuda_target(uint8_t *header, size_t start, size_t end,
   cudaMemcpyAsync(pined_inp, header, INPUT_LEN, cudaMemcpyHostToDevice, 0);
   cudaMemcpyAsync(pined_target, target, BLAKE3_OUT_LEN, cudaMemcpyHostToDevice,
                   0);
+  void *out;
+  checkCudaErrors(cudaMalloc(&out, 32 * 1024));
 
   checkCudaErrors(cudaProfilerStop());
 }
