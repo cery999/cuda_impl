@@ -390,7 +390,6 @@ extern "C" void blake3_hasher_reset_cuda(blake3_hasher *data, size_t N) {
 /* int main() { */
 /*   pre_allocate(); */
 /*   /1* test1(); *1/ */
-/*   test_init(); */
 /*   post_free(); */
 /* } */
 
