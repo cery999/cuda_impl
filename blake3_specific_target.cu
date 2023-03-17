@@ -2,6 +2,7 @@
 // includes, system
 #include <cstdint>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,7 +40,7 @@ enum blake3_flags {
   ROOT = 1 << 3,
 };
 
-static void *pined_inp, *pined_target;
+static uint8_t *pined_inp, *pined_target;
 
 __device__ __inline__ uint64_t to_big_end(uint64_t x) {
   // 1 2 3 4 5 6 7 8  -> 8 7 6 5 4 3 2 1
@@ -94,8 +95,8 @@ __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
     SB = 0xA54FF53AUL;                                                         \
     SC = 0;                                                                    \
     SD = 0;                                                                    \
-    SE = buf_len;                                                              \
-    SF = flag;                                                                 \
+    SE = (uint32_t)buf_len;                                                    \
+    SF = (uint32_t)flag;                                                       \
   } while (0);
 
 #define G(a, b, c, d, x, y)                                                    \
@@ -131,7 +132,7 @@ __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
     G(S0, S5, SA, SF, M[8], M[9]);                                             \
     G(S1, S6, SB, SC, M[10], M[11]);                                           \
     G(S2, S7, S8, SD, M[12], M[13]);                                           \
-    G(S3, S7, S9, SE, M[14], M[15]);                                           \
+    G(S3, S4, S9, SE, M[14], M[15]);                                           \
     G(S0, S4, S8, SC, M[2], M[6]);                                             \
     G(S1, S5, S9, SD, M[3], M[10]);                                            \
     G(S2, S6, SA, SE, M[7], M[0]);                                             \
@@ -139,7 +140,7 @@ __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
     G(S0, S5, SA, SF, M[1], M[11]);                                            \
     G(S1, S6, SB, SC, M[12], M[5]);                                            \
     G(S2, S7, S8, SD, M[9], M[14]);                                            \
-    G(S3, S7, S9, SE, M[15], M[8]);                                            \
+    G(S3, S4, S9, SE, M[15], M[8]);                                            \
     G(S0, S4, S8, SC, M[3], M[4]);                                             \
     G(S1, S5, S9, SD, M[10], M[12]);                                           \
     G(S2, S6, SA, SE, M[13], M[2]);                                            \
@@ -147,7 +148,7 @@ __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
     G(S0, S5, SA, SF, M[6], M[5]);                                             \
     G(S1, S6, SB, SC, M[9], M[0]);                                             \
     G(S2, S7, S8, SD, M[11], M[15]);                                           \
-    G(S3, S7, S9, SE, M[8], M[1]);                                             \
+    G(S3, S4, S9, SE, M[8], M[1]);                                             \
     G(S0, S4, S8, SC, M[10], M[7]);                                            \
     G(S1, S5, S9, SD, M[12], M[9]);                                            \
     G(S2, S6, SA, SE, M[14], M[3]);                                            \
@@ -155,7 +156,7 @@ __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
     G(S0, S5, SA, SF, M[4], M[0]);                                             \
     G(S1, S6, SB, SC, M[11], M[2]);                                            \
     G(S2, S7, S8, SD, M[5], M[8]);                                             \
-    G(S3, S7, S9, SE, M[1], M[6]);                                             \
+    G(S3, S4, S9, SE, M[1], M[6]);                                             \
     G(S0, S4, S8, SC, M[12], M[13]);                                           \
     G(S1, S5, S9, SD, M[9], M[11]);                                            \
     G(S2, S6, SA, SE, M[15], M[10]);                                           \
@@ -163,7 +164,7 @@ __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
     G(S0, S5, SA, SF, M[7], M[2]);                                             \
     G(S1, S6, SB, SC, M[5], M[3]);                                             \
     G(S2, S7, S8, SD, M[0], M[1]);                                             \
-    G(S3, S7, S9, SE, M[6], M[4]);                                             \
+    G(S3, S4, S9, SE, M[6], M[4]);                                             \
     G(S0, S4, S8, SC, M[9], M[14]);                                            \
     G(S1, S5, S9, SD, M[11], M[5]);                                            \
     G(S2, S6, SA, SE, M[8], M[12]);                                            \
@@ -171,7 +172,7 @@ __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
     G(S0, S5, SA, SF, M[13], M[3]);                                            \
     G(S1, S6, SB, SC, M[0], M[10]);                                            \
     G(S2, S7, S8, SD, M[2], M[6]);                                             \
-    G(S3, S7, S9, SE, M[4], M[7]);                                             \
+    G(S3, S4, S9, SE, M[4], M[7]);                                             \
     G(S0, S4, S8, SC, M[11], M[15]);                                           \
     G(S1, S5, S9, SD, M[5], M[0]);                                             \
     G(S2, S6, SA, SE, M[1], M[9]);                                             \
@@ -179,14 +180,15 @@ __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
     G(S0, S5, SA, SF, M[14], M[10]);                                           \
     G(S1, S6, SB, SC, M[2], M[12]);                                            \
     G(S2, S7, S8, SD, M[3], M[4]);                                             \
-    G(S3, S7, S9, SE, M[7], M[13]);                                            \
+    G(S3, S4, S9, SE, M[7], M[13]);                                            \
   } while (0);
 
 __global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
-                               size_t stride, uint8_t *d_target, uint8_t *out,
-                               uint64_t *random_idx, bool *found) {
+                               size_t stride, uint8_t *d_target, uint32_t *out,
+                               uint64_t *random_idx, uint32_t *random_vec_len) {
   auto idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < end) {
+  uint64_t random_i = start + idx * stride; // parallel random message with i
+  if (random_i < end) {
     // init chunk state
     // buf_len = 0, blocks_compressed = 0, flag = 0;
     uint32_t CV[8] = {0x6A09E667UL, 0xBB67AE85UL, 0x3C6EF372UL,
@@ -195,8 +197,6 @@ __global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
     uint32_t M[16] = {0};                          // message blocks
     uint32_t S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, SA, SB, SC, SD, SE,
         SF; // the state var
-
-    uint64_t random_i = start + idx * stride; // parallel random message with i
 
     // process first block with 64B with 180 - 64 remain
     uint32_t h_random_i = random_i >> 32, low_random_i = (uint32_t)(random_i);
@@ -230,7 +230,7 @@ __global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
     d_header += 52; // remain 0
 
     // init states
-    INIT(buf_len, CHUNK_END | ROOT);
+    INIT(52, CHUNK_END | ROOT);
     // round 0 - 6
     ROUND;
     UPDAET;
@@ -249,35 +249,61 @@ __global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
 
     uint8_t *out_cv = (uint8_t *)CV;
 #pragma unroll
-    for (auto i = 0; i < 8; i++) {
+    for (auto i = 0; i < BLAKE3_OUT_LEN; i++) {
       if (out_cv[i] > d_target[i]) {
         return;
       }
     }
-    
+
     // match i
-    random_idx = random_i;
-    found = true;
+    auto len = atomicAdd(random_vec_len, 1);
+    random_idx[len] = random_i;
   }
 }
 
-void special_cuda_target(uint8_t *header, size_t start, size_t end,
-                         size_t stride, uint8_t target[32]) {
+extern "C" void special_cuda_target(uint8_t *header, size_t start, size_t end,
+                                    size_t stride, uint8_t target[32]) {
   checkCudaErrors(cudaProfilerStart());
-  cudaMemcpyAsync(pined_inp, header, INPUT_LEN, cudaMemcpyHostToDevice, 0);
-  cudaMemcpyAsync(pined_target, target, BLAKE3_OUT_LEN, cudaMemcpyHostToDevice,
-                  0);
-  void *out;
-  checkCudaErrors(cudaMalloc(&out, 32 * 1024));
+  checkCudaErrors(
+      cudaMemcpy(pined_inp, header, INPUT_LEN, cudaMemcpyHostToDevice));
+  checkCudaErrors(
+      cudaMemcpy(pined_target, target, BLAKE3_OUT_LEN, cudaMemcpyHostToDevice));
+  uint32_t *out_len, *out;
+  uint64_t *out_randoms;
+  checkCudaErrors(cudaMalloc(&out, 100 * 1024 * BLAKE3_OUT_LEN));
+  checkCudaErrors(cudaMalloc(&out_len, sizeof(uint32_t)));
+  checkCudaErrors(cudaMalloc(&out_randoms, sizeof(uint64_t) * 1024));
+  checkCudaErrors(cudaMemset(out_len, 0, sizeof(uint32_t)));
+  special_launch<<<1, 1>>>(pined_inp, start, end, stride, pined_target, out,
+                           out_randoms, out_len);
+  getLastCudaError("launch fail!");
+  uint32_t host_len, host_randoms[10];
+  uint8_t *host_out = new uint8_t[1024 * 100 * BLAKE3_OUT_LEN];
+  checkCudaErrors(cudaMemcpy(host_out, out, 1024 * 100 * BLAKE3_OUT_LEN,
+                             cudaMemcpyDeviceToHost));
+  checkCudaErrors(
+      cudaMemcpy(&host_len, out_len, sizeof(uint32_t), cudaMemcpyDeviceToHost));
+  checkCudaErrors(cudaMemcpy(&host_randoms, out_randoms,
+                             host_len * sizeof(uint64_t),
+                             cudaMemcpyDeviceToHost));
 
+  for (auto i = 0; i < 32; i++) {
+    printf("%02x", host_out[i]);
+  }
+  printf("\n");
+  printf("found: %d\n", host_len);
   checkCudaErrors(cudaProfilerStop());
 }
 
 extern "C" void pre_allocate() {
   checkCudaErrors(cudaMalloc((void **)&pined_inp, INPUT_LEN));
+  checkCudaErrors(cudaMalloc((void **)&pined_target, 32));
 }
 
-extern "C" void post_free() { checkCudaErrors(cudaFree(pined_inp)); }
+extern "C" void post_free() {
+  checkCudaErrors(cudaFree(pined_inp));
+  checkCudaErrors(cudaFree(pined_target));
+}
 
 #ifdef __cplusplus
 }
