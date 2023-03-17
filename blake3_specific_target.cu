@@ -184,7 +184,7 @@ __global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
                                size_t stride, uint8_t *d_target) {
   auto idx = blockIdx.x * blockDim.x + threadIdx.x;
   // init chunk state
-  auto buf_len = 0, blocks_compressed = 0, flag = 0;
+  // buf_len = 0, blocks_compressed = 0, flag = 0;
   uint32_t CV[8] = {0x6A09E667UL, 0xBB67AE85UL, 0x3C6EF372UL,
                     0xA54FF53AUL, 0x510E527FUL, 0x9B05688CUL,
                     0x1F83D9ABUL, 0x5BE0CD19UL}; // cv
@@ -220,6 +220,20 @@ __global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
   // update chain value in place
   UPDAET;
   // blocks_compressed = 2 remain 52 do final
+
+  memcpy(&M[0], d_header, 52);
+  memset(&M[0] + 52, 0, BLAKE3_BLOCK_LEN - 52);
+  d_header += 52; // remain 0
+
+  // init states
+  INIT(buf_len, CHUNK_END | ROOT);
+  // round 0 - 6
+  ROUND;
+  UPDAET;
+  // done output will be chain value
+
+
+
 }
 
 void special_cuda_target(uint8_t *header, size_t start, size_t end,
