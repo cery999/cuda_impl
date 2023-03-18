@@ -41,6 +41,9 @@ enum blake3_flags {
 };
 
 static uint8_t *pined_inp, *pined_target;
+static uint32_t *pined_out_len, *pined_out;
+static uint64_t *pined_randoms;
+static cudaEvent_t event_start, event_stop;
 
 __device__ __inline__ uint64_t to_big_end(uint64_t x) {
   // 1 2 3 4 5 6 7 8  -> 8 7 6 5 4 3 2 1
@@ -77,6 +80,9 @@ extern "C" void to_big_kernel() {
 }
 __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
   return (w >> c) | (w << (32 - c));
+}
+__device__ __inline__ uint32_t to_bigend(uint32_t x) {
+  return __byte_perm(x, x, 0x0123);
 }
 
 #define INIT(buf_len, flag)                                                    \
@@ -200,10 +206,17 @@ __global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
 
     // process first block with 64B with 180 - 64 remain
     uint32_t h_random_i = random_i >> 32, low_random_i = (uint32_t)(random_i);
-    M[0] = __byte_perm(low_random_i, h_random_i, 0x0123);
-    M[1] = __byte_perm(low_random_i, h_random_i, 0x4567);
+    M[0] = __byte_perm(h_random_i, h_random_i, 0x0123);
+    M[1] = __byte_perm(low_random_i, low_random_i, 0x0123);
     d_header += 8;
-    memcpy(&M[2], d_header, 56); // copy 8 + 56 = 64B
+    for (auto i = 0; i < 14; i++) {
+      M[i + 2] = *((uint32_t *)d_header + i);
+      M[i + 2] = to_bigend(M[i + 2]);
+    }
+    /* for (auto i = 0; i < 64; i++) { */
+    /*   printf("%02x", ((uint8_t *)M)[i]); */
+    /* } */
+    /* printf("\n"); */
     d_header += 56;
 
     // init states
@@ -213,8 +226,19 @@ __global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
     // update chain value in place
     UPDAET;
 
+    /* printf("%d:%d,%d:%d,%d:%d,%d:%d,%d:%d,%d:%d,%d:%d,%d:%d,%d:%d,%d:%d,%d:%d,%"
+     */
+    /*        "d:%d,%d:%d,%d:%d,%d:%d,%d:%d,\n", */
+    /*        0, S0, 1, S1, 2, S2, 3, S3, 4, S4, 5, S5, 6, S6, 7, S7, 8, S8, 9,
+     * S9, */
+    /*        10, SA, 11, SB, 12, SC, 13, SD, 14, SE, 15, SF); */
+
     // blocks_compressed = 1 remain 116
-    memcpy(&M[0], d_header, BLAKE3_BLOCK_LEN); // copy 64B
+#pragma unroll
+    for (auto i = 0; i < 16; i++) {
+      M[i] = *((uint32_t *)d_header + i);
+      M[i] = to_bigend(M[i]);
+    }
     d_header += BLAKE3_BLOCK_LEN;
 
     // init states
@@ -225,8 +249,16 @@ __global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
     UPDAET;
     // blocks_compressed = 2 remain 52 do final
 
-    memcpy(&M[0], d_header, 52);
-    memset(&M[0] + 52, 0, BLAKE3_BLOCK_LEN - 52);
+#pragma unroll
+    for (auto i = 0; i < 13; i++) {
+      M[i] = *((uint32_t *)d_header + i);
+      M[i] = to_bigend(M[i]);
+    }
+
+#pragma unroll
+    for (auto i = 13; i < 16; i++) {
+      M[i] = 0;
+    }
     d_header += 52; // remain 0
 
     // init states
@@ -237,15 +269,15 @@ __global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
     // done output will be chain value
 
     // for debug
-    uint32_t *self_out = out + idx * 8;
-    self_out[0] = CV[0];
-    self_out[1] = CV[1];
-    self_out[2] = CV[2];
-    self_out[3] = CV[3];
-    self_out[4] = CV[4];
-    self_out[5] = CV[5];
-    self_out[6] = CV[6];
-    self_out[7] = CV[7];
+    /* uint32_t *self_out = out + idx * 8; */
+    /* self_out[0] = CV[0]; */
+    /* self_out[1] = CV[1]; */
+    /* self_out[2] = CV[2]; */
+    /* self_out[3] = CV[3]; */
+    /* self_out[4] = CV[4]; */
+    /* self_out[5] = CV[5]; */
+    /* self_out[6] = CV[6]; */
+    /* self_out[7] = CV[7]; */
 
     uint8_t *out_cv = (uint8_t *)CV;
 #pragma unroll
@@ -264,43 +296,48 @@ __global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
 extern "C" void special_cuda_target(uint8_t *header, size_t start, size_t end,
                                     size_t stride, uint8_t target[32]) {
   checkCudaErrors(cudaProfilerStart());
+  cudaEventRecord(event_start, 0);
   checkCudaErrors(
-      cudaMemcpy(pined_inp, header, INPUT_LEN, cudaMemcpyHostToDevice));
-  checkCudaErrors(
-      cudaMemcpy(pined_target, target, BLAKE3_OUT_LEN, cudaMemcpyHostToDevice));
-  uint32_t *out_len, *out;
-  uint64_t *out_randoms;
-  checkCudaErrors(cudaMalloc(&out, 100 * 1024 * BLAKE3_OUT_LEN));
-  checkCudaErrors(cudaMalloc(&out_len, sizeof(uint32_t)));
-  checkCudaErrors(cudaMalloc(&out_randoms, sizeof(uint64_t) * 1024));
-  checkCudaErrors(cudaMemset(out_len, 0, sizeof(uint32_t)));
-  special_launch<<<1, 1>>>(pined_inp, start, end, stride, pined_target, out,
-                           out_randoms, out_len);
+      cudaMemcpyAsync(pined_inp, header, INPUT_LEN, cudaMemcpyHostToDevice, 0));
+  checkCudaErrors(cudaMemcpyAsync(pined_target, target, BLAKE3_OUT_LEN,
+                                  cudaMemcpyHostToDevice));
+  /* checkCudaErrors(cudaMalloc(&out, 100 * 1024 * BLAKE3_OUT_LEN)); */
+  checkCudaErrors(cudaMemsetAsync(pined_out_len, 0, sizeof(uint32_t)));
+  special_launch<<<1000, 1024>>>(pined_inp, start, end, stride, pined_target,
+                                pined_out, pined_randoms, pined_out_len);
+
   getLastCudaError("launch fail!");
   uint32_t host_len, host_randoms[10];
-  uint8_t *host_out = new uint8_t[1024 * 100 * BLAKE3_OUT_LEN];
-  checkCudaErrors(cudaMemcpy(host_out, out, 1024 * 100 * BLAKE3_OUT_LEN,
-                             cudaMemcpyDeviceToHost));
-  checkCudaErrors(
-      cudaMemcpy(&host_len, out_len, sizeof(uint32_t), cudaMemcpyDeviceToHost));
-  checkCudaErrors(cudaMemcpy(&host_randoms, out_randoms,
+  /* uint8_t *host_out = new uint8_t[1024 * 100 * BLAKE3_OUT_LEN]; */
+  /* checkCudaErrors(cudaMemcpy(host_out, out, 1024 * 100 * BLAKE3_OUT_LEN, */
+  /*                            cudaMemcpyDeviceToHost)); */
+  checkCudaErrors(cudaMemcpyAsync(&host_len, pined_out_len, sizeof(uint32_t),
+                                  cudaMemcpyDeviceToHost));
+  cudaEventRecord(event_stop, 0);
+  checkCudaErrors(cudaMemcpy(&host_randoms, pined_randoms,
                              host_len * sizeof(uint64_t),
                              cudaMemcpyDeviceToHost));
 
-  for (auto i = 0; i < 32; i++) {
-    printf("%02x", host_out[i]);
-  }
-  printf("\n");
+  /* for (auto i = 0; i < 32; i++) { */
+  /*   printf("%02x", host_out[i]); */
+  /* } */
+  /* printf("\n"); */
   printf("found: %d\n", host_len);
   checkCudaErrors(cudaProfilerStop());
 }
 
 extern "C" void pre_allocate() {
+  checkCudaErrors(cudaEventCreate(&event_start));
+  checkCudaErrors(cudaEventCreate(&event_stop));
   checkCudaErrors(cudaMalloc((void **)&pined_inp, INPUT_LEN));
   checkCudaErrors(cudaMalloc((void **)&pined_target, 32));
+  checkCudaErrors(cudaMalloc(&pined_out_len, sizeof(uint32_t)));
+  checkCudaErrors(cudaMalloc(&pined_randoms, sizeof(uint64_t) * 1024));
 }
 
 extern "C" void post_free() {
+  checkCudaErrors(cudaEventDestroy(event_start));
+  checkCudaErrors(cudaEventDestroy(event_stop));
   checkCudaErrors(cudaFree(pined_inp));
   checkCudaErrors(cudaFree(pined_target));
 }
