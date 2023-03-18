@@ -294,7 +294,7 @@ __global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
 }
 
 extern "C" void special_cuda_target(uint8_t *header, size_t start, size_t end,
-                                    size_t stride, uint8_t target[32]) {
+                                    size_t stride, const uint8_t target[32]) {
   checkCudaErrors(cudaProfilerStart());
   cudaEventRecord(event_start, 0);
   checkCudaErrors(
