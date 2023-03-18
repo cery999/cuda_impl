@@ -293,8 +293,10 @@ __global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
   }
 }
 
-extern "C" void special_cuda_target(uint8_t *header, size_t start, size_t end,
-                                    size_t stride, const uint8_t target[32]) {
+extern "C" void special_cuda_target(const uint8_t *header, size_t start,
+                                    size_t end, size_t stride,
+                                    const uint8_t target[32],
+                                    size_t *host_randoms, uint32_t *host_len) {
   checkCudaErrors(cudaProfilerStart());
   cudaEventRecord(event_start, 0);
   checkCudaErrors(
@@ -304,25 +306,24 @@ extern "C" void special_cuda_target(uint8_t *header, size_t start, size_t end,
   /* checkCudaErrors(cudaMalloc(&out, 100 * 1024 * BLAKE3_OUT_LEN)); */
   checkCudaErrors(cudaMemsetAsync(pined_out_len, 0, sizeof(uint32_t)));
   special_launch<<<1000, 1024>>>(pined_inp, start, end, stride, pined_target,
-                                pined_out, pined_randoms, pined_out_len);
+                                 pined_out, pined_randoms, pined_out_len);
 
   getLastCudaError("launch fail!");
-  uint32_t host_len, host_randoms[10];
   /* uint8_t *host_out = new uint8_t[1024 * 100 * BLAKE3_OUT_LEN]; */
   /* checkCudaErrors(cudaMemcpy(host_out, out, 1024 * 100 * BLAKE3_OUT_LEN, */
   /*                            cudaMemcpyDeviceToHost)); */
-  checkCudaErrors(cudaMemcpyAsync(&host_len, pined_out_len, sizeof(uint32_t),
+  checkCudaErrors(cudaMemcpyAsync(host_len, pined_out_len, sizeof(uint32_t),
                                   cudaMemcpyDeviceToHost));
   cudaEventRecord(event_stop, 0);
-  checkCudaErrors(cudaMemcpy(&host_randoms, pined_randoms,
-                             host_len * sizeof(uint64_t),
+  checkCudaErrors(cudaMemcpy(host_randoms, pined_randoms,
+                             *host_len * sizeof(uint64_t),
                              cudaMemcpyDeviceToHost));
 
   /* for (auto i = 0; i < 32; i++) { */
   /*   printf("%02x", host_out[i]); */
   /* } */
   /* printf("\n"); */
-  printf("found: %d\n", host_len);
+  printf("found: %d\n", *host_len);
   checkCudaErrors(cudaProfilerStop());
 }
 
