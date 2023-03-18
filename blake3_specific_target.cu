@@ -189,7 +189,7 @@ __device__ __inline__ uint32_t to_bigend(uint32_t x) {
     G(S3, S4, S9, SE, M[7], M[13]);                                            \
   } while (0);
 
-__global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
+__global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
                                size_t stride, uint8_t *d_target, uint32_t *out,
                                uint64_t *random_idx, uint32_t *random_vec_len) {
   auto idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -293,10 +293,11 @@ __global__ void special_launch(uint8_t *d_header, size_t start, size_t end,
   }
 }
 
-extern "C" void special_cuda_target(const uint8_t *header, size_t start,
-                                    size_t end, size_t stride,
+extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
+                                    uint64_t end, size_t stride,
                                     const uint8_t target[32],
-                                    size_t *host_randoms, uint32_t *host_len) {
+                                    uint64_t *host_randoms,
+                                    uint32_t *host_len) {
   checkCudaErrors(cudaProfilerStart());
   cudaEventRecord(event_start, 0);
   checkCudaErrors(
