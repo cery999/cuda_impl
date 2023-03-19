@@ -264,6 +264,12 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     for (auto i = 0; i < 32; i++) {
       if (((uint8_t *)&CV)[i] > d_target[i])
         return;
+      if (((uint8_t *)&CV)[i] < d_target[i]) {
+        *found = true;
+        *random_idx = (uint64_t)atomicMin((unsigned long long int *)random_idx,
+                                          (unsigned long long int)random_i);
+        return;
+      }
     }
 
     // match i
