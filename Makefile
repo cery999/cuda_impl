@@ -22,6 +22,9 @@ blake3_cuda.o:blake3_cuda.cu
 blake3_specific_target.o:blake3_specific_target.cu 
 	$(EXEC) $(NVCC) $(INCLUDES) $(GENCODE_FLAGS) -o $@ -c $<
 
+blake3_specific_target_dbg.o:blake3_specific_target_test.cu 
+	$(EXEC) $(NVCC) $(INCLUDES) $(GENCODE_FLAGS) -o $@ -c $<
+
 blake3_cuda: blake3_cuda.o
 	$(EXEC) $(NVCC) $(GENCODE_FLAGS) -o $@ $+ $(LIBRARIES)
 
@@ -31,7 +34,7 @@ test.o: test.cpp
 test_c.o: test_c.cpp
 	$(EXEC) $(NVCC) $(INCLUDES) $(GENCODE_FLAGS) -o $@ -c $<
 
-test_c: test_c.o blake3_specific_target.o
+test_c: test_c.o blake3_specific_target_dbg.o
 	$(EXEC) $(NVCC) $(GENCODE_FLAGS) -o $@ $+ $(LIBRARIES)
 	# g++ $+ -I../c -lblake3 -L../c -Wl,-rpath=../c -o test_c
 
