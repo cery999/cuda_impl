@@ -222,6 +222,20 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
                                uint64_t *random_idx, bool *found) {
   auto idx = blockIdx.x * blockDim.x + threadIdx.x;
   uint64_t random_i = start + idx * stride; // parallel random message with i
+  coalesced_group wrap = coalesced_threads();
+  auto thread_id_in_wrap = wrap.thread_rank();
+  uint32_t k[8], CV[8];
+  if (thread_id_in_wrap == 0) {
+#pragma unroll
+    for (auto i = 0; i < 8; i++) {
+      /* printf("%d\n", g.thread_rank()); */
+      k[i] = *(((uint32_t *)d_target) + i);
+    }
+  }
+  for (auto i = 0; i < 8; i++) {
+    k[i] = wrap.shfl(k[i], 0);
+  }
+
   if (random_i < end) {
     // init chunk state
     // buf_len = 0, blocks_compressed = 0, flag = 0;
@@ -304,14 +318,32 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     self_out[6] = S6 ^ SE;
     self_out[7] = S7 ^ SF;
 
-    CHECK_TARGET(0, 8);
-    CHECK_TARGET(1, 9);
-    CHECK_TARGET(2, A);
-    CHECK_TARGET(3, B);
-    CHECK_TARGET(4, C);
-    CHECK_TARGET(5, D);
-    CHECK_TARGET(6, E);
-    CHECK_TARGET(7, F);
+    uint32_t tmp = S0 ^ S8;
+    printf("check target: ");
+    for (auto i = 0; i < 4; i++) {
+      printf("%02x", ((uint8_t *)&tmp)[i]);
+    }
+    printf("\n");
+    printf("wrap target: ");
+    for (auto i = 0; i < 4; i++) {
+      printf("%02x", ((uint8_t *)&k[0])[i]);
+    }
+    printf("\n");
+    for (auto i = 0; i < 32; i++) {
+      printf("%02x", d_target[i]);
+    }
+    printf("\n");
+    printf(" cv  > d_target : %d\n", tmp > k[0]);
+    UPDATE;
+  }
+
+  if (random_i < end) {
+    __syncwarp();
+#pragma unroll
+    for (auto i = 0; i < 32; i++) {
+      if (((uint8_t *)&CV)[i] > ((uint8_t *)&k)[i])
+        return;
+    }
 
     // match i
     *found = true;
@@ -337,14 +369,14 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   }
   grid = dim3(ceil(num * 1.0 / 1024), 1, 1);
   cudaEventRecord(event_start[device_id], 0);
-  cudaMemcpyAsync(pined_inp[device_id], header+8, INPUT_LEN-8,
+  cudaMemcpyAsync(pined_inp[device_id], header + 8, INPUT_LEN - 8,
                   cudaMemcpyHostToDevice, 0);
   cudaMemcpyAsync(pined_target[device_id], target, BLAKE3_OUT_LEN,
                   cudaMemcpyHostToDevice);
   cudaMemsetAsync(pined_found[device_id], 0, sizeof(bool));
-  special_launch<<<1, 1>>>(
-      pined_inp[device_id], start, end, stride, pined_target[device_id],
-      pined_out[device_id], pined_randoms[device_id], pined_found[device_id]);
+  special_launch<<<100,1024>>>(pined_inp[device_id], start, end, stride,
+                           pined_target[device_id], pined_out[device_id],
+                           pined_randoms[device_id], pined_found[device_id]);
   checkCudaErrors(cudaGetLastError());
   cudaMemcpyAsync(found, pined_found[device_id], sizeof(bool),
                   cudaMemcpyDeviceToHost);
