@@ -1,5 +1,6 @@
 // includes, system
 #include <cstdint>
+#include <cstdlib>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -217,6 +218,19 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
                                uint64_t *random_idx, bool *found) {
   auto idx = blockIdx.x * blockDim.x + threadIdx.x;
   uint64_t random_i = start + idx * stride; // parallel random message with i
+  coalesced_group wrap = coalesced_threads();
+  auto thread_id_in_wrap = wrap.thread_rank();
+  uint32_t k[8], CV[8];
+  if (thread_id_in_wrap == 0) {
+#pragma unroll
+    for (auto i = 0; i < 8; i++) {
+      /* printf("%d\n", g.thread_rank()); */
+      k[i] = *(((uint32_t *)d_target) + i);
+    }
+  }
+  for (auto i = 0; i < 8; i++) {
+    k[i] = wrap.shfl(k[i], 0);
+  }
   if (random_i < end) {
     // init chunk state
     // buf_len = 0, blocks_compressed = 0, flag = 0;
@@ -269,21 +283,20 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     INIT(52, CHUNK_END | ROOT);
     // round 0 - 6
     ROUND;
+  }
+  __syncwarp();
 
-    CHECK_TARGET(0, 8);
-    CHECK_TARGET(1, 9);
-    CHECK_TARGET(2, A);
-    CHECK_TARGET(3, B);
-    CHECK_TARGET(4, C);
-    CHECK_TARGET(5, D);
-    CHECK_TARGET(6, E);
-    CHECK_TARGET(7, F);
-
-    // match i
-    *found = true;
-    // may be fault on mac,x32 system
-    *random_idx = (uint64_t)atomicMin((unsigned long long int *)random_idx,
-                                      (unsigned long long int)random_i);
+  if (random_i < end) {
+#pragma unroll
+    for (auto i = 0; i < 32; i++) {
+      if (((uint8_t *)&CV)[i] > ((uint8_t *)&k)[i])
+        return;
+      // match i
+      *found = true;
+      // may be fault on mac,x32 system
+      *random_idx = (uint64_t)atomicMin((unsigned long long int *)random_idx,
+                                        (unsigned long long int)random_i);
+    }
   }
 }
 

@@ -317,28 +317,11 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     self_out[5] = S5 ^ SD;
     self_out[6] = S6 ^ SE;
     self_out[7] = S7 ^ SF;
-
-    uint32_t tmp = S0 ^ S8;
-    printf("check target: ");
-    for (auto i = 0; i < 4; i++) {
-      printf("%02x", ((uint8_t *)&tmp)[i]);
-    }
-    printf("\n");
-    printf("wrap target: ");
-    for (auto i = 0; i < 4; i++) {
-      printf("%02x", ((uint8_t *)&k[0])[i]);
-    }
-    printf("\n");
-    for (auto i = 0; i < 32; i++) {
-      printf("%02x", d_target[i]);
-    }
-    printf("\n");
-    printf(" cv  > d_target : %d\n", tmp > k[0]);
     UPDATE;
   }
 
+  __syncwarp();
   if (random_i < end) {
-    __syncwarp();
 #pragma unroll
     for (auto i = 0; i < 32; i++) {
       if (((uint8_t *)&CV)[i] > ((uint8_t *)&k)[i])
@@ -374,9 +357,9 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   cudaMemcpyAsync(pined_target[device_id], target, BLAKE3_OUT_LEN,
                   cudaMemcpyHostToDevice);
   cudaMemsetAsync(pined_found[device_id], 0, sizeof(bool));
-  special_launch<<<100,1024>>>(pined_inp[device_id], start, end, stride,
-                           pined_target[device_id], pined_out[device_id],
-                           pined_randoms[device_id], pined_found[device_id]);
+  special_launch<<<1, 1024>>>(pined_inp[device_id], start, end, stride,
+                            pined_target[device_id], pined_out[device_id],
+                            pined_randoms[device_id], pined_found[device_id]);
   checkCudaErrors(cudaGetLastError());
   cudaMemcpyAsync(found, pined_found[device_id], sizeof(bool),
                   cudaMemcpyDeviceToHost);
