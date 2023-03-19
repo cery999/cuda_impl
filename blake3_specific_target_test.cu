@@ -233,15 +233,14 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     uint32_t h_random_i = random_i >> 32, low_random_i = (uint32_t)(random_i);
     M[0] = __byte_perm(h_random_i, h_random_i, 0x0123);
     M[1] = __byte_perm(low_random_i, low_random_i, 0x0123);
-    d_header += 8;
     for (auto i = 0; i < 14; i++) {
       M[i + 2] = *((uint32_t *)d_header + i);
     }
-    printf("message: ");
-    for (auto i = 0; i < 64; i++) {
-      printf("%02x", ((uint8_t *)M)[i]);
-    }
-    printf("\n");
+    /* printf("message: "); */
+    /* for (auto i = 0; i < 64; i++) { */
+    /*   printf("%02x", ((uint8_t *)M)[i]); */
+    /* } */
+    /* printf("\n"); */
     d_header += 56;
 
     // init states
@@ -338,7 +337,7 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   }
   grid = dim3(ceil(num * 1.0 / 1024), 1, 1);
   cudaEventRecord(event_start[device_id], 0);
-  cudaMemcpyAsync(pined_inp[device_id], header, INPUT_LEN,
+  cudaMemcpyAsync(pined_inp[device_id], header+8, INPUT_LEN-8,
                   cudaMemcpyHostToDevice, 0);
   cudaMemcpyAsync(pined_target[device_id], target, BLAKE3_OUT_LEN,
                   cudaMemcpyHostToDevice);
