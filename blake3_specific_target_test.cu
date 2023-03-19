@@ -222,23 +222,11 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
                                uint64_t *random_idx, bool *found) {
   auto idx = blockIdx.x * blockDim.x + threadIdx.x;
   uint64_t random_i = start + idx * stride; // parallel random message with i
-  coalesced_group wrap = coalesced_threads();
-  auto thread_id_in_wrap = wrap.thread_rank();
-  uint32_t k[8], CV[8];
-  if (thread_id_in_wrap == 0) {
-#pragma unroll
-    for (auto i = 0; i < 8; i++) {
-      /* printf("%d\n", g.thread_rank()); */
-      k[i] = *(((uint32_t *)d_target) + i);
-    }
-  }
-  for (auto i = 0; i < 8; i++) {
-    k[i] = wrap.shfl(k[i], 0);
-  }
 
   if (random_i < end) {
     // init chunk state
     // buf_len = 0, blocks_compressed = 0, flag = 0;
+    uint32_t CV[8];
     uint32_t M[16] = {0}; // message blocks
     uint32_t S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, SA, SB, SC, SD, SE,
         SF; // the state var
@@ -304,7 +292,7 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     INIT(52, CHUNK_END | ROOT);
     // round 0 - 6
     ROUND;
-    /* UPDATE; */
+    UPDATE;
     // done output will be chain value
 
     // for debug
@@ -317,14 +305,10 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     self_out[5] = S5 ^ SD;
     self_out[6] = S6 ^ SE;
     self_out[7] = S7 ^ SF;
-    UPDATE;
-  }
 
-  __syncwarp();
-  if (random_i < end) {
 #pragma unroll
     for (auto i = 0; i < 32; i++) {
-      if (((uint8_t *)&CV)[i] > ((uint8_t *)&k)[i])
+      if (((uint8_t *)&CV)[i] > ((uint8_t *)&d_target)[i])
         return;
     }
 
@@ -358,8 +342,8 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
                   cudaMemcpyHostToDevice);
   cudaMemsetAsync(pined_found[device_id], 0, sizeof(bool));
   special_launch<<<1, 1024>>>(pined_inp[device_id], start, end, stride,
-                            pined_target[device_id], pined_out[device_id],
-                            pined_randoms[device_id], pined_found[device_id]);
+                              pined_target[device_id], pined_out[device_id],
+                              pined_randoms[device_id], pined_found[device_id]);
   checkCudaErrors(cudaGetLastError());
   cudaMemcpyAsync(found, pined_found[device_id], sizeof(bool),
                   cudaMemcpyDeviceToHost);
