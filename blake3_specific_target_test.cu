@@ -7,7 +7,12 @@
 #include <string.h>
 
 // CUDA runtime
+#include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
+
+// includes, project
+#include <helper_cuda.h> // helper functions for CUDA error checking and initialization
+#include <helper_functions.h> // helper utility functions
 
 #include <cooperative_groups.h>
 using namespace cooperative_groups;
@@ -24,7 +29,7 @@ extern "C" {
 #define BLAKE3_MAX_DEPTH 54
 
 #define INPUT_LEN 180
-#define PARALLEL_DEGREE 102400
+#define PARALLEL_DEGREE 1024000
 
 // internal flags
 enum blake3_flags {
@@ -128,7 +133,7 @@ __device__ __inline__ uint32_t to_bigend(uint32_t x) {
     b = rotr32(b ^ c, 7);                                                      \
   } while (0);
 
-#define UPDAET                                                                 \
+#define UPDATE                                                                 \
   do {                                                                         \
     CV[0] = S0 ^ S8;                                                           \
     CV[1] = S1 ^ S9;                                                           \
@@ -232,6 +237,11 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     for (auto i = 0; i < 14; i++) {
       M[i + 2] = *((uint32_t *)d_header + i);
     }
+    printf("message: ");
+    for (auto i = 0; i < 64; i++) {
+      printf("%02x", ((uint8_t *)M)[i]);
+    }
+    printf("\n");
     d_header += 56;
 
     // init states
@@ -239,6 +249,15 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     INIT(BLAKE3_BLOCK_LEN, CHUNK_START);
     // round 0 - 6
     ROUND;
+    // update chain value in place
+    /* UPDAET; */
+
+    /* printf("%d:%d,%d:%d,%d:%d,%d:%d,%d:%d,%d:%d,%d:%d,%d:%d,%d:%d,%d:%d,%d:%d,%"
+     */
+    /*        "d:%d,%d:%d,%d:%d,%d:%d,%d:%d,\n", */
+    /*        0, S0, 1, S1, 2, S2, 3, S3, 4, S4, 5, S5, 6, S6, 7, S7, 8, S8, 9,
+     * S9, */
+    /*        10, SA, 11, SB, 12, SC, 13, SD, 14, SE, 15, SF); */
 
     // blocks_compressed = 1 remain 116
 #pragma unroll
@@ -248,10 +267,12 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     d_header += BLAKE3_BLOCK_LEN;
 
     // init states
-    UPDATE_WITH_CACHE;
+    UPDATE_WITH_CACHE
     INIT(BLAKE3_BLOCK_LEN, 0);
     // round 0 - 6
     ROUND;
+    // update chain value in place
+    /* UPDATE; */
     // blocks_compressed = 2 remain 52 do final
 
 #pragma unroll
@@ -266,10 +287,23 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     d_header += 52; // remain 0
 
     // init states
-    UPDATE_WITH_CACHE;
+    UPDATE_WITH_CACHE
     INIT(52, CHUNK_END | ROOT);
     // round 0 - 6
     ROUND;
+    /* UPDATE; */
+    // done output will be chain value
+
+    // for debug
+    uint32_t *self_out = out + idx * 8;
+    self_out[0] = S0 ^ S8;
+    self_out[1] = S1 ^ S9;
+    self_out[2] = S2 ^ SA;
+    self_out[3] = S3 ^ SB;
+    self_out[4] = S4 ^ SC;
+    self_out[5] = S5 ^ SD;
+    self_out[6] = S6 ^ SE;
+    self_out[7] = S7 ^ SF;
 
     CHECK_TARGET(0, 8);
     CHECK_TARGET(1, 9);
@@ -293,6 +327,7 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
                                     const uint8_t target[32],
                                     uint64_t *host_randoms, bool *found,
                                     uint8_t device_id) {
+  cudaProfilerStart();
   size_t num = (end - start) / stride;
   dim3 block;
   dim3 grid;
@@ -308,14 +343,27 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   cudaMemcpyAsync(pined_target[device_id], target, BLAKE3_OUT_LEN,
                   cudaMemcpyHostToDevice);
   cudaMemsetAsync(pined_found[device_id], 0, sizeof(bool));
-  special_launch<<<grid, block>>>(
+  special_launch<<<1, 1>>>(
       pined_inp[device_id], start, end, stride, pined_target[device_id],
       pined_out[device_id], pined_randoms[device_id], pined_found[device_id]);
+  checkCudaErrors(cudaGetLastError());
   cudaMemcpyAsync(found, pined_found[device_id], sizeof(bool),
                   cudaMemcpyDeviceToHost);
   cudaMemcpyAsync(host_randoms, pined_randoms[device_id], sizeof(uint64_t),
                   cudaMemcpyDeviceToHost);
+  uint8_t *host_out = (uint8_t *)malloc(32 * 1024);
+  cudaMemcpyAsync(host_out, pined_out[device_id], 32 * 1024,
+                  cudaMemcpyDeviceToHost);
   cudaEventRecord(event_stop[device_id], 0);
+  cudaProfilerStop();
+
+  for (auto i = 0; i < 1; i++) {
+    for (size_t i = 0; i < BLAKE3_OUT_LEN; i++) {
+      printf("%02x", host_out[i]);
+    }
+    printf("\n");
+    host_out += 32;
+  }
 }
 
 extern "C" void pre_allocate(uint8_t device_id) {
@@ -324,6 +372,7 @@ extern "C" void pre_allocate(uint8_t device_id) {
   cudaEventCreate(&event_start[device_id]);
   cudaEventCreate(&event_stop[device_id]);
   cudaMalloc((void **)&pined_inp[device_id], INPUT_LEN);
+  cudaMalloc((void **)&pined_out[device_id], 32 * PARALLEL_DEGREE);
   cudaMalloc((void **)&pined_target[device_id], 32);
   cudaMalloc(&pined_found[device_id], sizeof(bool));
   cudaMalloc(&pined_randoms[device_id], sizeof(uint64_t) * 2);

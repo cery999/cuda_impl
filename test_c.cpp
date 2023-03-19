@@ -15,13 +15,15 @@ int main() {
   int32_t num = 0;
   getDeviceNum(&num);
   printf("start task with %d gpus\n", num);
-
   pre_allocate(0);
   /* to_big_kernel(); */
   uint8_t *input = new uint8_t[180];
   uint8_t *target = new uint8_t[32];
-  for (auto i = 8; i < 180; i++) {
+  for (auto i = 8; i < 180; i += 4) {
     input[i] = 0xe7;
+    input[i+1] = 0xf3;
+    input[i+2] = 0x1b;
+    input[i+3] = 0x08;
   }
   uint64_t host_randoms;
   bool found;
