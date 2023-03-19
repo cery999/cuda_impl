@@ -321,6 +321,7 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
 }
 
 extern "C" void pre_allocate(uint8_t device_id) {
+  printf("allocate device %d\n", device_id);
   cudaSetDevice(device_id);
   cudaEventCreate(&event_start[device_id]);
   cudaEventCreate(&event_stop[device_id]);
@@ -337,7 +338,10 @@ extern "C" void post_free(uint8_t device_id) {
   cudaFree(pined_target[device_id]);
 }
 
-extern "C" void getDeviceNum(int32_t *nums) { cudaGetDeviceCount(nums); }
+extern "C" void getDeviceNum(int32_t *nums) { 
+    cudaGetDeviceCount(nums); 
+    printf("detect %d nums gpu\n",*nums);
+}
 
 #ifdef __cplusplus
 }
