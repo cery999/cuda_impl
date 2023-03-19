@@ -129,7 +129,7 @@ __device__ __inline__ uint32_t to_bigend(uint32_t x) {
     b = rotr32(b ^ c, 7);                                                      \
   } while (0);
 
-#define UPDAET                                                                 \
+#define UPDATE                                                                 \
   do {                                                                         \
     CV[0] = S0 ^ S8;                                                           \
     CV[1] = S1 ^ S9;                                                           \
@@ -283,6 +283,7 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     INIT(52, CHUNK_END | ROOT);
     // round 0 - 6
     ROUND;
+    UPDATE;
   }
   __syncwarp();
 
