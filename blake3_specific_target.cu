@@ -201,18 +201,6 @@ __device__ __inline__ uint32_t to_bigend(uint32_t x) {
     G(S3, S4, S9, SE, M[7], M[13]);                                            \
   } while (0);
 
-#define CHECK_TARGET(N, P)                                                     \
-  do {                                                                         \
-    if ((((S##N ^ S##P) >> 0) & 0xff) > (*(d_target + N * 4 + 0)))             \
-      return;                                                                  \
-    if ((((S##N ^ S##P) >> 8) & 0xff) > (*(d_target + N * 4 + 1)))             \
-      return;                                                                  \
-    if ((((S##N ^ S##P) >> 16) & 0xff) > (*(d_target + N * 4 + 2)))            \
-      return;                                                                  \
-    if ((((S##N ^ S##P) >> 24) & 0xff) > (*(d_target + N * 4 + 3)))            \
-      return;                                                                  \
-  } while (0);
-
 __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
                                size_t stride, uint8_t *d_target, uint32_t *out,
                                uint64_t *random_idx, bool *found) {
@@ -272,18 +260,17 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     // round 0 - 6
     ROUND;
     UPDATE;
-    if (random_i < end) {
 #pragma unroll
-      for (auto i = 0; i < 32; i++) {
-        if (((uint8_t *)&CV)[i] > d_target[i])
-          return;
-        // match i
-        *found = true;
-        // may be fault on mac,x32 system
-        *random_idx = (uint64_t)atomicMin((unsigned long long int *)random_idx,
-                                          (unsigned long long int)random_i);
-      }
+    for (auto i = 0; i < 32; i++) {
+      if (((uint8_t *)&CV)[i] > d_target[i])
+        return;
     }
+
+    // match i
+    *found = true;
+    // may be fault on mac,x32 system
+    *random_idx = (uint64_t)atomicMin((unsigned long long int *)random_idx,
+                                      (unsigned long long int)random_i);
   }
 }
 
