@@ -8,12 +8,7 @@
 #include <string.h>
 
 // CUDA runtime
-#include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
-
-// includes, project
-#include <helper_cuda.h> // helper functions for CUDA error checking and initialization
-#include <helper_functions.h> // helper utility functions
 
 #include <cooperative_groups.h>
 using namespace cooperative_groups;
@@ -40,10 +35,11 @@ enum blake3_flags {
   ROOT = 1 << 3,
 };
 
-static uint8_t *pined_inp, *pined_target;
-static uint32_t *pined_out_len, *pined_out;
-static uint64_t *pined_randoms;
-static cudaEvent_t event_start, event_stop;
+static uint8_t *pined_inp[8], *pined_target[8];
+static uint32_t *pined_out[8];
+static uint64_t *pined_randoms[8];
+static bool *pined_found[8];
+static cudaEvent_t event_start[8], event_stop[8];
 
 __device__ __inline__ uint64_t to_big_end(uint64_t x) {
   // 1 2 3 4 5 6 7 8  -> 8 7 6 5 4 3 2 1
@@ -191,7 +187,7 @@ __device__ __inline__ uint32_t to_bigend(uint32_t x) {
 
 __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
                                size_t stride, uint8_t *d_target, uint32_t *out,
-                               uint64_t *random_idx, uint32_t *random_vec_len) {
+                               uint64_t *random_idx, bool *found) {
   auto idx = blockIdx.x * blockDim.x + threadIdx.x;
   uint64_t random_i = start + idx * stride; // parallel random message with i
   if (random_i < end) {
@@ -288,61 +284,60 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     }
 
     // match i
-    auto len = atomicAdd(random_vec_len, 1);
-    random_idx[len] = random_i;
+    *found = true;
+    // may be fault on mac,x32 system
+    *random_idx = (uint64_t)atomicMin((unsigned long long int *)random_idx,
+                                      (unsigned long long int)random_i);
   }
 }
 
 extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
                                     uint64_t end, size_t stride,
                                     const uint8_t target[32],
-                                    uint64_t *host_randoms,
-                                    uint32_t *host_len) {
-  checkCudaErrors(cudaProfilerStart());
-  cudaEventRecord(event_start, 0);
-  checkCudaErrors(
-      cudaMemcpyAsync(pined_inp, header, INPUT_LEN, cudaMemcpyHostToDevice, 0));
-  checkCudaErrors(cudaMemcpyAsync(pined_target, target, BLAKE3_OUT_LEN,
-                                  cudaMemcpyHostToDevice));
-  /* checkCudaErrors(cudaMalloc(&out, 100 * 1024 * BLAKE3_OUT_LEN)); */
-  checkCudaErrors(cudaMemsetAsync(pined_out_len, 0, sizeof(uint32_t)));
-  special_launch<<<1000, 1024>>>(pined_inp, start, end, stride, pined_target,
-                                 pined_out, pined_randoms, pined_out_len);
-
-  getLastCudaError("launch fail!");
-  /* uint8_t *host_out = new uint8_t[1024 * 100 * BLAKE3_OUT_LEN]; */
-  /* checkCudaErrors(cudaMemcpy(host_out, out, 1024 * 100 * BLAKE3_OUT_LEN, */
-  /*                            cudaMemcpyDeviceToHost)); */
-  checkCudaErrors(cudaMemcpyAsync(host_len, pined_out_len, sizeof(uint32_t),
-                                  cudaMemcpyDeviceToHost));
-  cudaEventRecord(event_stop, 0);
-  checkCudaErrors(cudaMemcpy(host_randoms, pined_randoms,
-                             *host_len * sizeof(uint64_t),
-                             cudaMemcpyDeviceToHost));
-
-  /* for (auto i = 0; i < 32; i++) { */
-  /*   printf("%02x", host_out[i]); */
-  /* } */
-  /* printf("\n"); */
-  printf("found: %d\n", *host_len);
-  checkCudaErrors(cudaProfilerStop());
+                                    uint64_t *host_randoms, bool *found,
+                                    uint8_t device_id) {
+  size_t num = (end - start) / stride;
+  dim3 block;
+  dim3 grid;
+  if (num > 1024) {
+    block = dim3(1024, 1, 1);
+  } else {
+    block = dim3(num, 1, 1);
+  }
+  grid = dim3(ceil(num * 1.0 / 1024), 1, 1);
+  cudaEventRecord(event_start[device_id], 0);
+  cudaMemcpyAsync(pined_inp[device_id], header, INPUT_LEN,
+                  cudaMemcpyHostToDevice, 0);
+  cudaMemcpyAsync(pined_target[device_id], target, BLAKE3_OUT_LEN,
+                  cudaMemcpyHostToDevice);
+  cudaMemsetAsync(pined_found[device_id], 0, sizeof(bool));
+  special_launch<<<grid, block>>>(
+      pined_inp[device_id], start, end, stride, pined_target[device_id],
+      pined_out[device_id], pined_randoms[device_id], pined_found[device_id]);
+  cudaMemcpyAsync(found, pined_found[device_id], sizeof(bool),
+                  cudaMemcpyDeviceToHost);
+  cudaMemcpyAsync(host_randoms, pined_randoms[device_id], sizeof(uint64_t),
+                  cudaMemcpyDeviceToHost);
+  cudaEventRecord(event_stop[device_id], 0);
 }
 
-extern "C" void pre_allocate() {
-  checkCudaErrors(cudaEventCreate(&event_start));
-  checkCudaErrors(cudaEventCreate(&event_stop));
-  checkCudaErrors(cudaMalloc((void **)&pined_inp, INPUT_LEN));
-  checkCudaErrors(cudaMalloc((void **)&pined_target, 32));
-  checkCudaErrors(cudaMalloc(&pined_out_len, sizeof(uint32_t)));
-  checkCudaErrors(cudaMalloc(&pined_randoms, sizeof(uint64_t) * 1024));
+extern "C" void pre_allocate(uint8_t device_id) {
+  cudaEventCreate(&event_start[device_id]);
+  cudaEventCreate(&event_stop[device_id]);
+  cudaMalloc((void **)&pined_inp[device_id], INPUT_LEN);
+  cudaMalloc((void **)&pined_target[device_id], 32);
+  cudaMalloc(&pined_found[device_id], sizeof(bool));
+  cudaMalloc(&pined_randoms[device_id], sizeof(uint64_t) * 2);
 }
 
-extern "C" void post_free() {
-  checkCudaErrors(cudaEventDestroy(event_start));
-  checkCudaErrors(cudaEventDestroy(event_stop));
-  checkCudaErrors(cudaFree(pined_inp));
-  checkCudaErrors(cudaFree(pined_target));
+extern "C" void post_free(uint8_t device_id) {
+  cudaEventDestroy(event_start[device_id]);
+  cudaEventDestroy(event_stop[device_id]);
+  cudaFree(pined_inp[device_id]);
+  cudaFree(pined_target[device_id]);
 }
+
+extern "C" void getDeviceNum(int32_t *nums) { cudaGetDeviceCount(nums); }
 
 #ifdef __cplusplus
 }
