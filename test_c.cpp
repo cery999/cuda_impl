@@ -6,7 +6,7 @@ extern "C" void pre_allocate(uint8_t device_id);
 extern "C" void post_free(uint8_t device_id);
 extern "C" void special_cuda_target(uint8_t *header, size_t start, size_t end,
                                     size_t stride, uint8_t target[32],
-                                    uint64_t *host_randoms, bool *found,
+                                    uint64_t *host_randoms, uint8_t *found,
                                     uint8_t device_id);
 extern "C" void getDeviceNum(int32_t *num);
 int main() {
@@ -26,7 +26,7 @@ int main() {
     input[i+3] = 0x08;
   }
   uint64_t host_randoms;
-  bool found;
+  uint8_t found = 0;
 
   special_cuda_target(input, 0x0102030405060708, 0x0f02030406060708, 1, target,
                       &host_randoms, &found, 0);

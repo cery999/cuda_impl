@@ -42,7 +42,7 @@ enum blake3_flags {
 static uint8_t *pined_inp[8], *pined_target[8];
 static uint32_t *pined_out[8];
 static uint64_t *pined_randoms[8];
-static bool *pined_found[8];
+static uint32_t *pined_found[8];
 static cudaEvent_t event_start[8], event_stop[8];
 
 __device__ __inline__ uint64_t to_big_end(uint64_t x) {
@@ -219,7 +219,7 @@ __device__ __inline__ uint32_t to_bigend(uint32_t x) {
 
 __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
                                size_t stride, uint8_t *d_target, uint32_t *out,
-                               uint64_t *random_idx, bool *found) {
+                               uint64_t *random_idx, uint32_t *found) {
   auto idx = blockIdx.x * blockDim.x + threadIdx.x;
   uint64_t random_i = start + idx * stride; // parallel random message with i
 
@@ -311,7 +311,7 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
       if (((uint8_t *)&CV)[i] > ((uint8_t *)&d_target)[i])
         return;
       if (((uint8_t *)&CV)[i] < d_target[i]) {
-        *found = true;
+        *found = 1;
         *random_idx = (uint64_t)atomicMin((unsigned long long int *)random_idx,
                                           (unsigned long long int)random_i);
         return;
@@ -319,7 +319,7 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     }
 
     // match i
-    *found = true;
+    *found = 1;
     // may be fault on mac,x32 system
     *random_idx = (uint64_t)atomicMin((unsigned long long int *)random_idx,
                                       (unsigned long long int)random_i);
@@ -329,7 +329,7 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
 extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
                                     uint64_t end, size_t stride,
                                     const uint8_t target[32],
-                                    uint64_t *host_randoms, bool *found,
+                                    uint64_t *host_randoms, uint32_t *found,
                                     uint8_t device_id) {
   cudaProfilerStart();
   size_t num = (end - start) / stride;
@@ -346,12 +346,12 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
                   cudaMemcpyHostToDevice, 0);
   cudaMemcpyAsync(pined_target[device_id], target, BLAKE3_OUT_LEN,
                   cudaMemcpyHostToDevice);
-  cudaMemsetAsync(pined_found[device_id], 0, sizeof(bool));
+  cudaMemsetAsync(pined_found[device_id], 0, sizeof(uint32_t));
   special_launch<<<1, 1024>>>(pined_inp[device_id], start, end, stride,
                               pined_target[device_id], pined_out[device_id],
                               pined_randoms[device_id], pined_found[device_id]);
   checkCudaErrors(cudaGetLastError());
-  cudaMemcpyAsync(found, pined_found[device_id], sizeof(bool),
+  cudaMemcpyAsync(found, pined_found[device_id], sizeof(uint32_t),
                   cudaMemcpyDeviceToHost);
   cudaMemcpyAsync(host_randoms, pined_randoms[device_id], sizeof(uint64_t),
                   cudaMemcpyDeviceToHost);
@@ -378,7 +378,7 @@ extern "C" void pre_allocate(uint8_t device_id) {
   cudaMalloc((void **)&pined_inp[device_id], INPUT_LEN);
   cudaMalloc((void **)&pined_out[device_id], 32 * PARALLEL_DEGREE);
   cudaMalloc((void **)&pined_target[device_id], 32);
-  cudaMalloc(&pined_found[device_id], sizeof(bool));
+  cudaMalloc(&pined_found[device_id], sizeof(uint32_t));
   cudaMalloc(&pined_randoms[device_id], sizeof(uint64_t) * 2);
 }
 
