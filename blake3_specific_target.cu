@@ -38,7 +38,7 @@ enum blake3_flags {
 static uint8_t *pined_inp[8], *pined_target[8];
 static uint32_t *pined_out[8];
 static uint64_t *pined_randoms[8];
-static uint32_t *pined_found[8];
+static bool *pined_found[8];
 static cudaEvent_t event_start[8], event_stop[8];
 
 __device__ __inline__ uint64_t to_big_end(uint64_t x) {
@@ -120,11 +120,11 @@ __device__ __inline__ uint32_t to_bigend(uint32_t x) {
 #define G(a, b, c, d, x, y)                                                    \
   do {                                                                         \
     a = a + b + x;                                                             \
-    d = rotr32(d ^ a, 16);                                                     \
+    d = __byte_perm(d ^ a, d ^ a, 0x1032);                                     \
     c = c + d;                                                                 \
     b = rotr32(b ^ c, 12);                                                     \
     a = a + b + y;                                                             \
-    d = rotr32(d ^ a, 8);                                                      \
+    d = __byte_perm(d ^ a, d ^ a, 0x0321);                                     \
     c = c + d;                                                                 \
     b = rotr32(b ^ c, 7);                                                      \
   } while (0);
@@ -203,7 +203,7 @@ __device__ __inline__ uint32_t to_bigend(uint32_t x) {
 
 __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
                                size_t stride, uint8_t *d_target, uint32_t *out,
-                               uint64_t *random_idx, uint32_t *found) {
+                               uint64_t *random_idx, bool *found) {
   auto idx = blockIdx.x * blockDim.x + threadIdx.x;
   uint64_t random_i = start + idx * stride; // parallel random message with i
 
@@ -218,10 +218,12 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     uint32_t h_random_i = random_i >> 32, low_random_i = (uint32_t)(random_i);
     M[0] = __byte_perm(h_random_i, h_random_i, 0x0123);
     M[1] = __byte_perm(low_random_i, low_random_i, 0x0123);
-    for (auto i = 0; i < 14; i++) {
-      M[i + 2] = *((uint32_t *)d_header + i);
+    for (auto i = 0; i < 3; i++) {
+      *(reinterpret_cast<int4 *>(&M[i * 4 + 2])) =
+          *(reinterpret_cast<int4 *>(&d_header[i * 16]));
     }
-    d_header += 56;
+    *(reinterpret_cast<int2 *>(&M[14])) =
+        *(reinterpret_cast<int2 *>(&d_header[48]));
 
     // init states
     UPDATE_WITH_CV;
@@ -231,11 +233,10 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
 
     // blocks_compressed = 1 remain 116
 #pragma unroll
-    for (auto i = 0; i < 16; i++) {
-      M[i] = *((uint32_t *)d_header + i);
+    for (auto i = 0; i < 4; i++) {
+      *(reinterpret_cast<int4 *>(&M[i * 4])) =
+          *(reinterpret_cast<int4 *>(&d_header[i * 16 + 56]));
     }
-    d_header += BLAKE3_BLOCK_LEN;
-
     // init states
     UPDATE_WITH_CACHE;
     INIT(BLAKE3_BLOCK_LEN, 0);
@@ -244,15 +245,12 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     // blocks_compressed = 2 remain 52 do final
 
 #pragma unroll
-    for (auto i = 0; i < 13; i++) {
-      M[i] = *((uint32_t *)d_header + i);
+    for (auto i = 0; i < 3; i++) {
+      *(reinterpret_cast<int4 *>(&M[i * 4])) =
+          *(reinterpret_cast<int4 *>(&d_header[i * 16 + 56 + 64]));
     }
-
-#pragma unroll
-    for (auto i = 13; i < 16; i++) {
-      M[i] = 0;
-    }
-    d_header += 52; // remain 0
+    *(reinterpret_cast<int2 *>(&M[13])) = make_int2(0, 0);
+    M[15] = 0;
 
     // init states
     UPDATE_WITH_CACHE;
@@ -265,7 +263,7 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
       if (((uint8_t *)&CV)[i] > d_target[i])
         return;
       if (((uint8_t *)&CV)[i] < d_target[i]) {
-        *found = 1;
+        *found = true;
         *random_idx = (uint64_t)atomicMin((unsigned long long int *)random_idx,
                                           (unsigned long long int)random_i);
         return;
@@ -283,7 +281,7 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
 extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
                                     uint64_t end, size_t stride,
                                     const uint8_t target[32],
-                                    uint64_t *host_randoms, uint32_t *found,
+                                    uint64_t *host_randoms, bool *found,
                                     uint8_t device_id) {
   size_t num = (end - start) / stride;
   dim3 block;
@@ -299,11 +297,11 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
                   cudaMemcpyHostToDevice, 0);
   cudaMemcpyAsync(pined_target[device_id], target, BLAKE3_OUT_LEN,
                   cudaMemcpyHostToDevice);
-  cudaMemsetAsync(pined_found[device_id], 0, sizeof(uint32_t));
+  cudaMemsetAsync(pined_found[device_id], 0, sizeof(bool));
   special_launch<<<grid, block>>>(
       pined_inp[device_id], start, end, stride, pined_target[device_id],
       pined_out[device_id], pined_randoms[device_id], pined_found[device_id]);
-  cudaMemcpyAsync(found, pined_found[device_id], sizeof(uint32_t),
+  cudaMemcpyAsync(found, pined_found[device_id], sizeof(bool),
                   cudaMemcpyDeviceToHost);
   cudaMemcpyAsync(host_randoms, pined_randoms[device_id], sizeof(uint64_t),
                   cudaMemcpyDeviceToHost);
@@ -317,7 +315,7 @@ extern "C" void pre_allocate(uint8_t device_id) {
   cudaEventCreate(&event_stop[device_id]);
   cudaMalloc((void **)&pined_inp[device_id], INPUT_LEN);
   cudaMalloc((void **)&pined_target[device_id], 32);
-  cudaMalloc(&pined_found[device_id], sizeof(uint32_t));
+  cudaMalloc(&pined_found[device_id], sizeof(bool));
   cudaMalloc(&pined_randoms[device_id], sizeof(uint64_t) * 2);
 }
 
