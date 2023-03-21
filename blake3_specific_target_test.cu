@@ -124,11 +124,11 @@ __device__ __inline__ uint32_t to_bigend(uint32_t x) {
 #define G(a, b, c, d, x, y)                                                    \
   do {                                                                         \
     a = a + b + x;                                                             \
-    d = rotr32(d ^ a, 16);                                                     \
+    d = __byte_perm(d ^ a, d ^ a, 0x1032);                                     \
     c = c + d;                                                                 \
     b = rotr32(b ^ c, 12);                                                     \
     a = a + b + y;                                                             \
-    d = rotr32(d ^ a, 8);                                                      \
+    d = __byte_perm(d ^ a, d ^ a, 0x0321);                                     \
     c = c + d;                                                                 \
     b = rotr32(b ^ c, 7);                                                      \
   } while (0);
@@ -220,9 +220,9 @@ __device__ __inline__ uint32_t to_bigend(uint32_t x) {
 __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
                                size_t stride, uint8_t *d_target, uint32_t *out,
                                uint64_t *random_idx, uint32_t *found) {
+  thread_block g = this_thread_block();
   auto idx = blockIdx.x * blockDim.x + threadIdx.x;
   uint64_t random_i = start + idx * stride; // parallel random message with i
-
   if (random_i < end) {
     // init chunk state
     // buf_len = 0, blocks_compressed = 0, flag = 0;
@@ -235,15 +235,19 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     uint32_t h_random_i = random_i >> 32, low_random_i = (uint32_t)(random_i);
     M[0] = __byte_perm(h_random_i, h_random_i, 0x0123);
     M[1] = __byte_perm(low_random_i, low_random_i, 0x0123);
-    for (auto i = 0; i < 14; i++) {
-      M[i + 2] = *((uint32_t *)d_header + i);
+    for (auto i = 0; i < 3; i++) {
+      *(reinterpret_cast<int4 *>(&M[i * 4 + 2])) =
+          *(reinterpret_cast<int4 *>(&d_header[i * 16]));
     }
+    *(reinterpret_cast<int2 *>(&M[14])) =
+        *(reinterpret_cast<int2 *>(&d_header[48]));
+
     /* printf("message: "); */
     /* for (auto i = 0; i < 64; i++) { */
     /*   printf("%02x", ((uint8_t *)M)[i]); */
     /* } */
     /* printf("\n"); */
-    d_header += 56;
+    /* d_header += 56; */
 
     // init states
     UPDATE_WITH_CV;
@@ -262,10 +266,11 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
 
     // blocks_compressed = 1 remain 116
 #pragma unroll
-    for (auto i = 0; i < 16; i++) {
-      M[i] = *((uint32_t *)d_header + i);
+    for (auto i = 0; i < 4; i++) {
+      *(reinterpret_cast<int4 *>(&M[i * 4])) =
+          *(reinterpret_cast<int4 *>(&d_header[i * 16 + 56]));
     }
-    d_header += BLAKE3_BLOCK_LEN;
+    /* d_header += BLAKE3_BLOCK_LEN; */
 
     // init states
     UPDATE_WITH_CACHE
@@ -277,14 +282,13 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     // blocks_compressed = 2 remain 52 do final
 
 #pragma unroll
-    for (auto i = 0; i < 13; i++) {
-      M[i] = *((uint32_t *)d_header + i);
+    for (auto i = 0; i < 3; i++) {
+      *(reinterpret_cast<int4 *>(&M[i * 4])) =
+          *(reinterpret_cast<int4 *>(&d_header[i * 16 + 56 + 64]));
     }
+    *(reinterpret_cast<int2 *>(&M[13])) = make_int2(0, 0);
+    M[15] = 0;
 
-#pragma unroll
-    for (auto i = 13; i < 16; i++) {
-      M[i] = 0;
-    }
     d_header += 52; // remain 0
 
     // init states
@@ -347,9 +351,9 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   cudaMemcpyAsync(pined_target[device_id], target, BLAKE3_OUT_LEN,
                   cudaMemcpyHostToDevice);
   cudaMemsetAsync(pined_found[device_id], 0, sizeof(uint32_t));
-  special_launch<<<1, 1024>>>(pined_inp[device_id], start, end, stride,
-                              pined_target[device_id], pined_out[device_id],
-                              pined_randoms[device_id], pined_found[device_id]);
+  special_launch<<<100, 1024>>>(
+      pined_inp[device_id], start, end, stride, pined_target[device_id],
+      pined_out[device_id], pined_randoms[device_id], pined_found[device_id]);
   checkCudaErrors(cudaGetLastError());
   cudaMemcpyAsync(found, pined_found[device_id], sizeof(uint32_t),
                   cudaMemcpyDeviceToHost);
