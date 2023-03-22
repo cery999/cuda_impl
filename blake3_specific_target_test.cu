@@ -1,5 +1,6 @@
 // includes, system
 #include <cstdint>
+#include <cstdlib>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -42,7 +43,7 @@ enum blake3_flags {
 static uint8_t *pined_inp[8], *pined_target[8];
 static uint32_t *pined_out[8];
 static uint64_t *pined_randoms[8];
-static uint32_t *pined_found[8];
+static bool *pined_found[8];
 static cudaEvent_t event_start[8], event_stop[8];
 
 __device__ __inline__ uint64_t to_big_end(uint64_t x) {
@@ -84,6 +85,39 @@ __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
 __device__ __inline__ uint32_t to_bigend(uint32_t x) {
   return __byte_perm(x, x, 0x0123);
 }
+
+#define PRINT_RESULT                                                           \
+  do {                                                                         \
+    for (auto i = 0; i < 32; i++) {                                            \
+      printf("%02x", d_target[i]);                                             \
+    }                                                                          \
+    printf("\n");                                                              \
+    for (auto i = 0; i < 4; i++) {                                             \
+      printf("%02x", ((uint8_t *)&S0)[i]);                                     \
+    }                                                                          \
+    for (auto i = 0; i < 4; i++) {                                             \
+      printf("%02x", ((uint8_t *)&S1)[i]);                                     \
+    }                                                                          \
+    for (auto i = 0; i < 4; i++) {                                             \
+      printf("%02x", ((uint8_t *)&S2)[i]);                                     \
+    }                                                                          \
+    for (auto i = 0; i < 4; i++) {                                             \
+      printf("%02x", ((uint8_t *)&S3)[i]);                                     \
+    }                                                                          \
+    for (auto i = 0; i < 4; i++) {                                             \
+      printf("%02x", ((uint8_t *)&S4)[i]);                                     \
+    }                                                                          \
+    for (auto i = 0; i < 4; i++) {                                             \
+      printf("%02x", ((uint8_t *)&S5)[i]);                                     \
+    }                                                                          \
+    for (auto i = 0; i < 4; i++) {                                             \
+      printf("%02x", ((uint8_t *)&S6)[i]);                                     \
+    }                                                                          \
+    for (auto i = 0; i < 4; i++) {                                             \
+      printf("%02x", ((uint8_t *)&S7)[i]);                                     \
+    }                                                                          \
+    printf("\n");                                                              \
+  } while (0);
 
 #define UPDATE_WITH_CV                                                         \
   do {                                                                         \
@@ -217,16 +251,28 @@ __device__ __inline__ uint32_t to_bigend(uint32_t x) {
       return;                                                                  \
   } while (0);
 
+#define CHECK_I(i)                                                             \
+  do {                                                                         \
+    if (S##i > d_target_u32[i]) {                                              \
+      found = false;                                                           \
+      goto reduce;                                                             \
+    } else if (S##i < d_target_u32[i]) {                                       \
+      found = true;                                                            \
+      goto reduce;                                                             \
+    }                                                                          \
+  } while (0);
+
 __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
                                size_t stride, uint8_t *d_target, uint32_t *out,
-                               uint64_t *random_idx, uint32_t *found) {
-  thread_block g = this_thread_block();
+                               uint64_t *block_random_idx, bool *block_found) {
   auto idx = blockIdx.x * blockDim.x + threadIdx.x;
   uint64_t random_i = start + idx * stride; // parallel random message with i
+  auto found = false;
+  thread_block cta = this_thread_block();
+  __shared__ uint64_t shared_found[32];
   if (random_i < end) {
     // init chunk state
     // buf_len = 0, blocks_compressed = 0, flag = 0;
-    uint32_t CV[8];
     uint32_t M[16] = {0}; // message blocks
     uint32_t S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, SA, SB, SC, SD, SE,
         SF; // the state var
@@ -288,7 +334,6 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     }
     *(reinterpret_cast<int2 *>(&M[13])) = make_int2(0, 0);
     M[15] = 0;
-
     d_header += 52; // remain 0
 
     // init states
@@ -296,7 +341,6 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     INIT(52, CHUNK_END | ROOT);
     // round 0 - 6
     ROUND;
-    UPDATE;
     // done output will be chain value
 
     // for debug
@@ -310,23 +354,70 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     self_out[6] = S6 ^ SE;
     self_out[7] = S7 ^ SF;
 
-#pragma unroll
-    for (auto i = 0; i < 32; i++) {
-      if (((uint8_t *)&CV)[i] > ((uint8_t *)&d_target)[i])
-        return;
-      if (((uint8_t *)&CV)[i] < d_target[i]) {
-        *found = 1;
-        *random_idx = (uint64_t)atomicMin((unsigned long long int *)random_idx,
-                                          (unsigned long long int)random_i);
-        return;
-      }
+    S0 ^= S8;
+    S1 ^= S9;
+    S2 ^= SA;
+    S3 ^= SB;
+    S4 ^= SC;
+    S5 ^= SD;
+    S6 ^= SE;
+    S7 ^= SF;
+
+    uint32_t *d_target_u32 = (uint32_t *)d_target;
+    if (idx == 0) {
+      PRINT_RESULT;
     }
 
-    // match i
-    *found = 1;
-    // may be fault on mac,x32 system
-    *random_idx = (uint64_t)atomicMin((unsigned long long int *)random_idx,
-                                      (unsigned long long int)random_i);
+    CHECK_I(0);
+    CHECK_I(1);
+    CHECK_I(2);
+    CHECK_I(3);
+    CHECK_I(4);
+    CHECK_I(5);
+    CHECK_I(6);
+    CHECK_I(7);
+    found = true; // equal
+                  // do block reduce and save to global
+  reduce:;
+
+    thread_block_tile<32> tile = tiled_partition<32>(cta);
+    tile.sync();
+    bool warp_found = false;
+    uint64_t warp_random_idx = random_i;
+    warp_found = tile.any(found);
+    if (warp_found) {
+      for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        warp_random_idx = __shfl_down_sync(0xffffffff, warp_random_idx, offset);
+        warp_random_idx = min(random_i, warp_random_idx);
+      }
+    }
+    __shared__ bool thread_tile_group_found[16];
+    __shared__ uint64_t thread_tile_group_random[16];
+    if (tile.thread_rank() == 0) {
+      thread_tile_group_found[tile.meta_group_rank()] = found;
+      thread_tile_group_random[tile.meta_group_rank()] = warp_random_idx;
+    }
+    sync(cta);
+
+    bool warp_group_found = false;
+    uint64_t warp_group_random = warp_random_idx;
+    if (tile.meta_group_rank() == 0) {
+      if (tile.thread_rank() < tile.meta_group_size()) {
+        warp_group_found =
+            __any_sync(0x0000ffff, thread_tile_group_found[tile.thread_rank()]);
+
+        for (int offset = tile.meta_group_size() / 2; offset > 0; offset /= 2) {
+          warp_group_random =
+              __shfl_down_sync(0x0000ffff, warp_group_random, offset);
+          warp_group_random = min(warp_random_idx, warp_group_random);
+        }
+      }
+      tile.sync();
+      if (tile.thread_rank() == 0) {
+        block_found[cta.group_index().x] = warp_group_found;
+        block_random_idx[cta.group_index().x] = warp_group_random;
+      }
+    }
   }
 }
 
@@ -350,12 +441,14 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
                   cudaMemcpyHostToDevice, 0);
   cudaMemcpyAsync(pined_target[device_id], target, BLAKE3_OUT_LEN,
                   cudaMemcpyHostToDevice);
-  cudaMemsetAsync(pined_found[device_id], 0, sizeof(uint32_t));
-  special_launch<<<100, 1024>>>(
+  cudaMemsetAsync(pined_found[device_id], 0, 1024 * sizeof(bool));
+  cudaMemsetAsync(pined_randoms[device_id], 0, 1024 * sizeof(uint64_t));
+#define BLOCK_SIZE 32
+  special_launch<<<BLOCK_SIZE, 512>>>(
       pined_inp[device_id], start, end, stride, pined_target[device_id],
       pined_out[device_id], pined_randoms[device_id], pined_found[device_id]);
   checkCudaErrors(cudaGetLastError());
-  cudaMemcpyAsync(found, pined_found[device_id], sizeof(uint32_t),
+  cudaMemcpyAsync(found, pined_found[device_id], sizeof(bool),
                   cudaMemcpyDeviceToHost);
   cudaMemcpyAsync(host_randoms, pined_randoms[device_id], sizeof(uint64_t),
                   cudaMemcpyDeviceToHost);
@@ -363,6 +456,7 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   cudaMemcpyAsync(host_out, pined_out[device_id], 32 * 1024,
                   cudaMemcpyDeviceToHost);
   cudaEventRecord(event_stop[device_id], 0);
+  cudaEventSynchronize(event_stop[device_id]);
   cudaProfilerStop();
 
   for (auto i = 0; i < 1; i++) {
@@ -382,8 +476,8 @@ extern "C" void pre_allocate(uint8_t device_id) {
   cudaMalloc((void **)&pined_inp[device_id], INPUT_LEN);
   cudaMalloc((void **)&pined_out[device_id], 32 * PARALLEL_DEGREE);
   cudaMalloc((void **)&pined_target[device_id], 32);
-  cudaMalloc(&pined_found[device_id], sizeof(uint32_t));
-  cudaMalloc(&pined_randoms[device_id], sizeof(uint64_t) * 2);
+  cudaMalloc((void **)&pined_found[device_id], sizeof(bool) * 1024);
+  cudaMalloc((void **)&pined_randoms[device_id], sizeof(uint64_t) * 1024);
 }
 
 extern "C" void post_free(uint8_t device_id) {
