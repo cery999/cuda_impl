@@ -421,6 +421,35 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
   }
 }
 
+__global__ void global_block_reduce(bool *global_found, uint64_t *global_random,
+                                    uint64_t blockSize) {
+  auto cta = this_thread_block();
+  auto warp = tiled_partition<32>(cta);
+  auto idx = cta.thread_rank();
+  __shared__ bool shared_global_found[32];
+  if (idx < blockSize) {
+    auto block_found = global_found[idx];
+    auto warp_found = warp.any(block_found);
+    uint64_t warp_random = global_random[idx];
+    uint64_t self_random = warp_random;
+    for (auto offset = warpSize / 2; offset > 0; offset /= 2) {
+      self_random = min(warp.shfl_down(self_random, offset), self_random);
+    }
+    if (warp.thread_rank() == 0) {
+      shared_global_found[warp.meta_group_rank()] = warp_found;
+    }
+    sync(cta);
+
+    if (warp.meta_group_rank() == 0) {
+      auto global_shared_found =
+          warp.any(shared_global_found[warp.thread_rank()]);
+      if (global_shared_found && warp.thread_rank() == 0) {
+        global_found[0] = global_shared_found;
+      }
+    }
+  }
+}
+
 extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
                                     uint64_t end, size_t stride,
                                     const uint8_t target[32],
@@ -448,6 +477,7 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
       pined_inp[device_id], start, end, stride, pined_target[device_id],
       pined_out[device_id], pined_randoms[device_id], pined_found[device_id]);
   checkCudaErrors(cudaGetLastError());
+
   cudaMemcpyAsync(found, pined_found[device_id], sizeof(bool),
                   cudaMemcpyDeviceToHost);
   cudaMemcpyAsync(host_randoms, pined_randoms[device_id], sizeof(uint64_t),
