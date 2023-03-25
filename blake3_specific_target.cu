@@ -26,7 +26,7 @@ extern "C" {
 #define BLAKE3_MAX_DEPTH 54
 
 #define INPUT_LEN 180
-#define PARALLEL_DEGREE 1024
+#define PARALLEL_DEGREE 10240
 
 // internal flags
 enum blake3_flags {
@@ -41,7 +41,6 @@ static uint32_t *pined_out[8];
 static uint64_t *pined_randoms[8];
 static bool *pined_found[8];
 static cudaEvent_t event_start[8], event_stop[8];
-static bool pined_host_found;
 
 __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
   return (w >> c) | (w << (32 - c));
@@ -171,12 +170,12 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
   auto tile = tiled_partition<32>(cta);
   auto grid = this_grid();
 
-  __shared__ bool thread_tile_group_found[16 + 1];
-  __shared__ uint64_t thread_tile_group_random[16 + 1];
+  __shared__ bool thread_tile_group_found[32 + 1];
+  __shared__ uint64_t thread_tile_group_random[32 + 1];
   if (random_i < end) {
     // init chunk state
     // buf_len = 0, blocks_compressed = 0, flag = 0;
-    uint32_t M[16] = {0}, CV[8]; // message blocks
+    uint32_t M[16] = {0}; // message blocks
     uint32_t S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, SA, SB, SC, SD, SE,
         SF; // the state var
 
@@ -217,7 +216,12 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     UPDATE_WITH_CACHE;
     INIT(52, CHUNK_END | ROOT);
     ROUND;
-    UPDATE;
+    /* UPDATE; */
+    UPDATE_WITH_CACHE;
+
+    uint32_t CV[8];
+    *reinterpret_cast<uint4 *>(&CV[0]) = make_uint4(S0, S1, S2, S3);
+    *reinterpret_cast<uint4 *>(&CV[4]) = make_uint4(S4, S5, S6, S7);
 
     auto is_break = false;
     for (auto i = 0; i < 32; i++) {
@@ -251,22 +255,22 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
   if (tile.meta_group_rank() == 0) {
     bool warp_group_found = false;
     uint64_t warp_group_random = UINT64_MAX;
-    if (tile.thread_rank() < 16) {
-      warp_group_found = thread_tile_group_found[tile.thread_rank()];
-      warp_group_random = thread_tile_group_random[tile.thread_rank()];
-    }
+    warp_group_found = thread_tile_group_found[tile.thread_rank()];
+    warp_group_random = thread_tile_group_random[tile.thread_rank()];
 
-    for (auto offset = 8; offset > 0; offset >>= 1) {
-      warp_group_found |=
-          __shfl_down_sync(0x000000ff, warp_group_found, offset);
-      warp_group_random =
-          min(__shfl_down_sync(0x000000ff, warp_group_random, offset),
-              warp_group_random);
-    }
+    warp_group_found = tile.any(warp_group_found);
+    warp_group_random = reduce(tile, warp_group_random, less<uint64_t>());
+    /* for (auto offset = 16; offset > 0; offset >>= 1) { */
+    /*   warp_group_found |= */
+    /*       __shfl_down_sync(0x0000ffff, warp_group_found, offset); */
+    /*   warp_group_random = */
+    /*       min(__shfl_down_sync(0x0000ffff, warp_group_random, offset), */
+    /*           warp_group_random); */
+    /* } */
 
     if (tile.thread_rank() == 0 && tile.meta_group_rank() == 0) {
-      block_found[grid.block_rank()] = warp_found;
-      block_random_idx[grid.block_rank()] = warp_random_idx;
+      block_found[grid.block_rank()] = warp_group_found;
+      block_random_idx[grid.block_rank()] = warp_group_random;
     }
   }
 }
@@ -362,11 +366,10 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   size_t num = ceil((end - start) * 1.0 / stride);
   dim3 block;
   dim3 grid;
-  block = dim3(512, 1, 1);
-  grid = dim3(ceil(num * 1.0 / 512), 1, 1);
-
+  block = dim3(1024, 1, 1);
+  grid = dim3(ceil(num * 1.0 / 1024), 1, 1);
   cudaEventRecord(event_start[device_id], 0);
-  cudaMemcpyAsync(pined_inp[device_id], header - 8, INPUT_LEN - 8,
+  cudaMemcpyAsync(pined_inp[device_id], header + 8, INPUT_LEN - 8,
                   cudaMemcpyHostToDevice, 0);
   cudaMemcpyAsync(pined_target[device_id], target, BLAKE3_OUT_LEN,
                   cudaMemcpyHostToDevice);
@@ -385,6 +388,7 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
     reduceGlobalBlocks<<<grid, block>>>(pined_found[device_id],
                                         pined_randoms[device_id], grid.x);
   }
+  bool pined_host_found;
   cudaMemcpyAsync(&pined_host_found, pined_found[device_id], sizeof(bool),
                   cudaMemcpyDeviceToHost);
   cudaMemcpyAsync(host_randoms, pined_randoms[device_id], sizeof(uint64_t),

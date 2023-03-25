@@ -272,7 +272,6 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     /*   printf("%02x", ((uint8_t *)M)[i]); */
     /* } */
     /* printf("\n"); */
-    /* d_header += 56; */
 
     // init states
     UPDATE_WITH_CV;
@@ -345,6 +344,13 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     uint32_t CV[8];
     *reinterpret_cast<uint4 *>(&CV[0]) = make_uint4(S0, S1, S2, S3);
     *reinterpret_cast<uint4 *>(&CV[4]) = make_uint4(S4, S5, S6, S7);
+
+    /* if (random_i < end) { */
+    /*   for (int i = 0; i < 32; i++) { */
+    /*     printf("%02x", ((uint8_t *)CV)[i]); */
+    /*   } */
+    /*   printf("\n"); */
+    /* } */
 
     auto is_break = false;
     for (auto i = 0; i < 32; i++) {
