@@ -566,7 +566,7 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   if (block.x > 1) {
     printf("launch %d grid %d block reduce\n", grid.x, block.x);
     reduceGlobalBlocks<<<grid, block>>>(pined_found[device_id],
-                                        pined_randoms[device_id], grid.x);
+                                        pined_randoms[device_id], total_block_num);
   }
   checkCudaErrors(cudaGetLastError());
   bool global_found;

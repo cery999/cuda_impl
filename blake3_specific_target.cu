@@ -377,7 +377,6 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   special_launch<<<grid, block>>>(
       pined_inp[device_id], start, end, stride, pined_target[device_id],
       pined_out[device_id], pined_randoms[device_id], pined_found[device_id]);
-
   auto total_block_num = grid.x;
   if (total_block_num >= 1024) {
     block = dim3(1024, 1, 1);
@@ -387,7 +386,7 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   grid = dim3(ceil((total_block_num * 1.0) / 1024), 1, 1);
   if (block.x > 1) {
     reduceGlobalBlocks<<<grid, block>>>(pined_found[device_id],
-                                        pined_randoms[device_id], grid.x);
+                                        pined_randoms[device_id], total_block_num);
   }
   bool pined_host_found;
   cudaMemcpyAsync(&pined_host_found, pined_found[device_id], sizeof(bool),
