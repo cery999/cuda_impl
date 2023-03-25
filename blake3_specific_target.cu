@@ -313,12 +313,13 @@ __global__ void reduceGlobalBlocks(bool *global_found, uint64_t *global_random,
     }
   }
 
+  auto idx = tid + gridSize;
   for (int offset = warpSize / 2; offset > 0; offset /= 2) {
     auto warp_found = found;
     auto warp_random = random;
     warp_found |= __shfl_down_sync(mask, warp_found, offset);
     warp_random = min(__shfl_down_sync(mask, warp_random, offset), warp_random);
-    if (threadIdx.x + offset < block.size()) {
+    if (((threadIdx.x + offset) < block.size()) && ((idx + offset) < num)) {
       found = warp_found;
       random = warp_random;
     }
