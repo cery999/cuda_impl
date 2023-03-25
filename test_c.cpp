@@ -15,7 +15,7 @@ void cpu_blake3(uint8_t input[180], uint8_t target[32], uint64_t start,
   uint8_t *out = (uint8_t *)malloc(32);
   uint8_t *out_process = out;
   auto found = false;
-  for (auto j = start; j < end; j += stride) {
+  for (auto j = start; j <= end; j += stride) {
     // Initialize the hasher.
     blake3_hasher hasher;
     blake3_hasher_init(&hasher);

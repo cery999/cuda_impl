@@ -249,7 +249,7 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
   auto grid = this_grid();
   __shared__ bool thread_tile_group_found[17];
   __shared__ uint64_t thread_tile_group_random[17];
-  if (random_i < end) {
+  if (random_i <= end) {
     // init chunk state
     // buf_len = 0, blocks_compressed = 0, flag = 0;
     uint32_t M[16] = {0}; // message blocks
@@ -345,7 +345,7 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     *reinterpret_cast<uint4 *>(&CV[0]) = make_uint4(S0, S1, S2, S3);
     *reinterpret_cast<uint4 *>(&CV[4]) = make_uint4(S4, S5, S6, S7);
 
-    /* if (random_i < end) { */
+    /* if (random_i <= end) { */
     /*   for (int i = 0; i < 32; i++) { */
     /*     printf("%02x", ((uint8_t *)CV)[i]); */
     /*   } */

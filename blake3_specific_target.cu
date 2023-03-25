@@ -172,7 +172,7 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
 
   __shared__ bool thread_tile_group_found[32 + 1];
   __shared__ uint64_t thread_tile_group_random[32 + 1];
-  if (random_i < end) {
+  if (random_i <= end) {
     // init chunk state
     // buf_len = 0, blocks_compressed = 0, flag = 0;
     uint32_t M[16] = {0}; // message blocks
