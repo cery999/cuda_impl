@@ -11,6 +11,7 @@
 #include <cuda_runtime.h>
 
 #include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
 using namespace cooperative_groups;
 
 #ifdef __cplusplus
@@ -25,7 +26,7 @@ extern "C" {
 #define BLAKE3_MAX_DEPTH 54
 
 #define INPUT_LEN 180
-#define PARALLEL_DEGREE 102400
+#define PARALLEL_DEGREE 1024
 
 // internal flags
 enum blake3_flags {
@@ -38,47 +39,12 @@ enum blake3_flags {
 static uint8_t *pined_inp[8], *pined_target[8];
 static uint32_t *pined_out[8];
 static uint64_t *pined_randoms[8];
-static uint32_t *pined_found[8];
+static bool *pined_found[8];
 static cudaEvent_t event_start[8], event_stop[8];
+static bool pined_host_found;
 
-__device__ __inline__ uint64_t to_big_end(uint64_t x) {
-  // 1 2 3 4 5 6 7 8  -> 8 7 6 5 4 3 2 1
-  return ((uint64_t)__byte_perm((uint32_t)(x), (uint32_t)(x >> 32), 0x0123)
-          << 32) |
-         __byte_perm((uint32_t)(x), (uint32_t)(x >> 32), 0x4567);
-}
-
-__global__ void to_big_end_launch(uint64_t *a, uint64_t *out) {
-  *out = to_big_end(*a);
-}
-
-extern "C" void to_big_kernel() {
-  void *a, *out;
-  cudaMalloc(&a, sizeof(uint64_t));
-  cudaMalloc(&out, sizeof(uint64_t));
-  uint64_t l = 0x0102030405060708;
-  uint8_t *ptr_l = (uint8_t *)&l;
-  for (int i = 0; i < 8; i++) {
-    printf("%02x", ptr_l[i]);
-  }
-  printf("\n");
-  cudaMemcpy(a, &l, sizeof(uint64_t), cudaMemcpyHostToDevice);
-  to_big_end_launch<<<1, 1>>>((uint64_t *)a, (uint64_t *)out);
-  uint64_t oo;
-  cudaMemcpy(&oo, out, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-  uint8_t *ptr = (uint8_t *)&oo;
-  for (int i = 0; i < 8; i++) {
-    printf("%02x", ptr[i]);
-  }
-  printf("\n");
-  cudaFree(a);
-  cudaFree(out);
-}
 __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
   return (w >> c) | (w << (32 - c));
-}
-__device__ __inline__ uint32_t to_bigend(uint32_t x) {
-  return __byte_perm(x, x, 0x0123);
 }
 
 #define UPDATE_WITH_CV                                                         \
@@ -131,14 +97,8 @@ __device__ __inline__ uint32_t to_bigend(uint32_t x) {
 
 #define UPDATE                                                                 \
   do {                                                                         \
-    CV[0] = S0 ^ S8;                                                           \
-    CV[1] = S1 ^ S9;                                                           \
-    CV[2] = S2 ^ SA;                                                           \
-    CV[3] = S3 ^ SB;                                                           \
-    CV[4] = S4 ^ SC;                                                           \
-    CV[5] = S5 ^ SD;                                                           \
-    CV[6] = S6 ^ SE;                                                           \
-    CV[7] = S7 ^ SF;                                                           \
+    *reinterpret_cast<uint4 *>(&CV[0]) = make_uint4(S0, S1, S2, S3);           \
+    *reinterpret_cast<uint4 *>(&CV[4]) = make_uint4(S4, S5, S6, S7);           \
   } while (0);
 
 #define ROUND                                                                  \
@@ -203,10 +163,16 @@ __device__ __inline__ uint32_t to_bigend(uint32_t x) {
 
 __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
                                size_t stride, uint8_t *d_target, uint32_t *out,
-                               uint64_t *random_idx, uint32_t *found) {
+                               uint64_t *block_random_idx, bool *block_found) {
   auto idx = blockIdx.x * blockDim.x + threadIdx.x;
   uint64_t random_i = start + idx * stride; // parallel random message with i
+  auto found = false;
+  auto cta = this_thread_block();
+  auto tile = tiled_partition<32>(cta);
+  auto grid = this_grid();
 
+  __shared__ bool thread_tile_group_found[16 + 1];
+  __shared__ uint64_t thread_tile_group_random[16 + 1];
   if (random_i < end) {
     // init chunk state
     // buf_len = 0, blocks_compressed = 0, flag = 0;
@@ -225,24 +191,19 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     *(reinterpret_cast<int2 *>(&M[14])) =
         *(reinterpret_cast<int2 *>(&d_header[48]));
 
-    // init states
     UPDATE_WITH_CV;
     INIT(BLAKE3_BLOCK_LEN, CHUNK_START);
-    // round 0 - 6
     ROUND;
 
-    // blocks_compressed = 1 remain 116
 #pragma unroll
     for (auto i = 0; i < 4; i++) {
       *(reinterpret_cast<int4 *>(&M[i * 4])) =
           *(reinterpret_cast<int4 *>(&d_header[i * 16 + 56]));
     }
-    // init states
+
     UPDATE_WITH_CACHE;
     INIT(BLAKE3_BLOCK_LEN, 0);
-    // round 0 - 6
     ROUND;
-    // blocks_compressed = 2 remain 52 do final
 
 #pragma unroll
     for (auto i = 0; i < 3; i++) {
@@ -255,26 +216,141 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     // init states
     UPDATE_WITH_CACHE;
     INIT(52, CHUNK_END | ROOT);
-    // round 0 - 6
     ROUND;
     UPDATE;
-#pragma unroll
+
+    auto is_break = false;
     for (auto i = 0; i < 32; i++) {
-      if (((uint8_t *)&CV)[i] > d_target[i])
-        return;
-      if (((uint8_t *)&CV)[i] < d_target[i]) {
-        *found = true;
-        *random_idx = (uint64_t)atomicMin((unsigned long long int *)random_idx,
-                                          (unsigned long long int)random_i);
-        return;
+      if (((uint8_t *)CV)[i] < d_target[i]) {
+        is_break = true;
+        found = true;
+        break;
+      }
+      if (((uint8_t *)CV)[i] > d_target[i]) {
+        is_break = true;
+        found = false;
+        break;
       }
     }
+    if (!is_break) {
+      found = true; // equal
+    }
+  }
 
-    // match i
-    *found = true;
-    // may be fault on mac,x32 system
-    *random_idx = (uint64_t)atomicMin((unsigned long long int *)random_idx,
-                                      (unsigned long long int)random_i);
+  bool warp_found = false;
+  uint64_t warp_random_idx = found ? random_i : UINT64_MAX;
+  warp_found = tile.any(found);
+  warp_random_idx = reduce(tile, warp_random_idx, less<uint64_t>());
+
+  if (tile.thread_rank() == 0) {
+    thread_tile_group_found[tile.meta_group_rank()] = warp_found;
+    thread_tile_group_random[tile.meta_group_rank()] = warp_random_idx;
+  }
+  sync(cta);
+
+  if (tile.meta_group_rank() == 0) {
+    bool warp_group_found = false;
+    uint64_t warp_group_random = UINT64_MAX;
+    if (tile.thread_rank() < 16) {
+      warp_group_found = thread_tile_group_found[tile.thread_rank()];
+      warp_group_random = thread_tile_group_random[tile.thread_rank()];
+    }
+
+    for (auto offset = 8; offset > 0; offset >>= 1) {
+      warp_group_found |=
+          __shfl_down_sync(0x000000ff, warp_group_found, offset);
+      warp_group_random =
+          min(__shfl_down_sync(0x000000ff, warp_group_random, offset),
+              warp_group_random);
+    }
+
+    if (tile.thread_rank() == 0 && tile.meta_group_rank() == 0) {
+      block_found[grid.block_rank()] = warp_found;
+      block_random_idx[grid.block_rank()] = warp_random_idx;
+    }
+  }
+}
+
+__global__ void reduceGlobalBlocks(bool *global_found, uint64_t *global_random,
+                                   uint64_t num) {
+  volatile __shared__ bool shared_found[32];
+  volatile __shared__ uint64_t shared_random[32];
+  auto block = this_thread_block();
+
+  unsigned int tid = threadIdx.x;
+  unsigned int gridSize = block.size() * gridDim.x;
+  unsigned int maskLength = (block.size() & 31); // 31 = warpSize-1
+  maskLength = (maskLength > 0) ? (32 - maskLength) : maskLength;
+  const unsigned int mask = (0xffffffff) >> maskLength;
+
+  bool found = false;
+  uint64_t random = UINT64_MAX;
+  if ((block.size() & (block.size() - 1)) == 0) {
+    unsigned int i = blockIdx.x * block.size() * 2 + threadIdx.x;
+    gridSize = gridSize << 1;
+    while (i < num) {
+      found |= global_found[i];
+      random = min(global_random[i], random);
+
+      // ensure we don't read out of bounds -- this is optimized away for
+      // powerOf2 sized arrays
+      if ((i + block.size()) < num) {
+        found |= global_found[i + block.size()];
+        random = min(global_random[i + block.size()], random);
+      }
+      i += gridSize;
+    }
+  } else {
+    unsigned int i = blockIdx.x * block.size() + threadIdx.x;
+    while (i < num) {
+      found |= global_found[i];
+      random = min(random, global_random[i]);
+      i += gridSize;
+    }
+  }
+
+  for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+    auto warp_found = found;
+    auto warp_random = random;
+    warp_found |= __shfl_down_sync(mask, warp_found, offset);
+    warp_random = min(__shfl_down_sync(mask, warp_random, offset), warp_random);
+    if (threadIdx.x + offset < block.size()) {
+      found = warp_found;
+      random = warp_random;
+    }
+  }
+
+  if ((tid % warpSize) == 0) {
+    shared_found[tid / warpSize] = found;
+    shared_random[tid / warpSize] = random;
+  }
+  __syncthreads();
+
+  const unsigned int shmem_extent =
+      block.size() / warpSize > 0 ? block.size() / warpSize : 1;
+  const unsigned int ballot_result = __ballot_sync(mask, tid < shmem_extent);
+  if (tid < shmem_extent) {
+    found = shared_found[tid];
+    random = shared_random[tid];
+
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+      auto warp_group_found = found;
+      auto warp_group_random = random;
+      warp_group_found |=
+          __shfl_down_sync(ballot_result, warp_group_found, offset);
+      warp_group_random =
+          min(warp_group_random,
+              __shfl_down_sync(ballot_result, warp_group_random, offset));
+      if ((tid + offset) < shmem_extent) {
+        found = warp_group_found;
+        random = warp_group_random;
+      }
+    }
+  }
+
+  if (tid == 0) {
+    global_found[blockIdx.x] = found;
+    global_random[blockIdx.x] = random;
   }
 }
 
@@ -283,29 +359,39 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
                                     const uint8_t target[32],
                                     uint64_t *host_randoms, uint32_t *found,
                                     uint8_t device_id) {
-  size_t num = (end - start) / stride;
+  size_t num = ceil((end - start) * 1.0 / stride);
   dim3 block;
   dim3 grid;
-  if (num > 1024) {
-    block = dim3(1024, 1, 1);
-  } else {
-    block = dim3(num, 1, 1);
-  }
-  grid = dim3(ceil(num * 1.0 / 1024), 1, 1);
+  block = dim3(512, 1, 1);
+  grid = dim3(ceil(num * 1.0 / 512), 1, 1);
+
   cudaEventRecord(event_start[device_id], 0);
   cudaMemcpyAsync(pined_inp[device_id], header - 8, INPUT_LEN - 8,
                   cudaMemcpyHostToDevice, 0);
   cudaMemcpyAsync(pined_target[device_id], target, BLAKE3_OUT_LEN,
                   cudaMemcpyHostToDevice);
-  cudaMemsetAsync(pined_found[device_id], 0, sizeof(uint32_t));
   special_launch<<<grid, block>>>(
       pined_inp[device_id], start, end, stride, pined_target[device_id],
       pined_out[device_id], pined_randoms[device_id], pined_found[device_id]);
-  cudaMemcpyAsync(found, pined_found[device_id], sizeof(uint32_t),
+
+  auto total_block_num = grid.x;
+  if (total_block_num >= 1024) {
+    block = dim3(1024, 1, 1);
+  } else {
+    block = dim3(total_block_num, 1, 1);
+  }
+  grid = dim3(ceil((total_block_num * 1.0) / 1024), 1, 1);
+  if (block.x > 1) {
+    reduceGlobalBlocks<<<grid, block>>>(pined_found[device_id],
+                                        pined_randoms[device_id], grid.x);
+  }
+  cudaMemcpyAsync(&pined_host_found, pined_found[device_id], sizeof(bool),
                   cudaMemcpyDeviceToHost);
   cudaMemcpyAsync(host_randoms, pined_randoms[device_id], sizeof(uint64_t),
                   cudaMemcpyDeviceToHost);
   cudaEventRecord(event_stop[device_id], 0);
+  cudaEventSynchronize(event_stop[device_id]);
+  *found = (uint32_t)pined_host_found;
 }
 
 extern "C" void pre_allocate(uint8_t device_id) {
@@ -315,8 +401,8 @@ extern "C" void pre_allocate(uint8_t device_id) {
   cudaEventCreate(&event_stop[device_id]);
   cudaMalloc((void **)&pined_inp[device_id], INPUT_LEN);
   cudaMalloc((void **)&pined_target[device_id], 32);
-  cudaMalloc(&pined_found[device_id], sizeof(uint32_t));
-  cudaMalloc(&pined_randoms[device_id], sizeof(uint64_t) * 2);
+  cudaMalloc(&pined_found[device_id], sizeof(bool) * PARALLEL_DEGREE);
+  cudaMalloc(&pined_randoms[device_id], sizeof(uint64_t) * PARALLEL_DEGREE);
 }
 
 extern "C" void post_free(uint8_t device_id) {

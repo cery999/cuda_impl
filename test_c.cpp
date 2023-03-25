@@ -87,7 +87,7 @@ int main() {
   uint64_t host_randoms;
   uint32_t found = 0;
   uint64_t start = 100;
-  uint64_t end = 500;
+  uint64_t end = 512 * 1024;
   size_t stride = 1;
   cpu_blake3(input, target, start, end, stride);
   special_cuda_target(input, start, end, stride, target, &host_randoms, &found,
