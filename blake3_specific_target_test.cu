@@ -262,7 +262,7 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
   auto grid = this_grid();
   __shared__ bool thread_tile_group_found[16];
   __shared__ uint64_t thread_tile_group_random[16];
-  if (random_i <= end) {
+  if (random_i < end) {
     // init chunk state
     // buf_len = 0, blocks_compressed = 0, flag = 0;
     uint32_t M[16] = {0}; // message blocks
@@ -361,27 +361,25 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
 
     auto is_break = false;
     for (auto i = 0; i < 32; i++) {
-      if (((uint8_t *)CV)[0] < d_target[i]) {
+      if (((uint8_t *)CV)[i] < d_target[i]) {
         is_break = true;
         found = true;
+        break;
       }
-      if (((uint8_t *)CV)[0] > d_target[i]) {
+      if (((uint8_t *)CV)[i] > d_target[i]) {
         is_break = true;
         found = false;
+        break;
       }
     }
-    if (!is_break)
+    if (!is_break) {
       found = true; // equal
-                    /* if (idx == 0) { */
-                    /*   PRINT_RESULT; */
-                    /* } */
+    }
+    /* printf("compare_hash found: %d , random : %d\n", found, random_i); */
+    /* if (idx == 0) { */
+    /*   PRINT_RESULT; */
+    /* } */
   }
-
-  // do block reduce and save to global
-  /* if (random_i <= end) { */
-  /*   printf("thread: %d, found: %d, random_i: %ld\n", idx, found, random_i);
-   */
-  /* } */
 
   if (tile.thread_rank() == 0) {
     thread_tile_group_found[tile.meta_group_rank()] = false;
@@ -420,7 +418,8 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
     if (tile.thread_rank() == 0 && tile.meta_group_rank() == 0) {
       block_found[blockIdx.x] = warp_group_found;
       block_random_idx[blockIdx.x] = warp_group_random;
-      /* printf("blockid: %d: found %d, random: %lld, thredid: %lld\n", blockIdx.x, */
+      /* printf("blockid: %d: found %d, random: %lld, thredid: %lld\n",
+       * blockIdx.x, */
       /*        warp_group_found, warp_group_random, cta.thread_rank()); */
     }
   }
@@ -454,7 +453,8 @@ __global__ void reduceGlobalBlocks(bool *global_found, uint64_t *global_random,
         found |= global_found[i + block.size()];
         random = min(global_random[i + block.size()], random);
       }
-      /* printf("global1: %d: found %d, random: %lld, thredid: %lld\n", i, found, */
+      /* printf("global1: %d: found %d, random: %lld, thredid: %lld\n", i,
+       * found, */
       /*        random, threadIdx.x); */
 
       i += gridSize;
@@ -465,7 +465,8 @@ __global__ void reduceGlobalBlocks(bool *global_found, uint64_t *global_random,
       found |= global_found[i];
       random = min(random, global_random[i]);
 
-      /* printf("global2: %d: found %d, random: %lld, thredid: %lld\n", i, found, */
+      /* printf("global2: %d: found %d, random: %lld, thredid: %lld\n", i,
+       * found, */
       /*        random, threadIdx.x); */
       i += gridSize;
     }
@@ -573,7 +574,7 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   }
   grid = dim3(ceil((total_block_num * 1.0) / 1024), 1, 1);
   if (block.x > 0) {
-    printf("launch %d grid %d block reduce", grid.x, block.x);
+    printf("launch %d grid %d block reduce\n", grid.x, block.x);
     reduceGlobalBlocks<<<grid, block>>>(pined_found[device_id],
                                         pined_randoms[device_id], grid.x);
   }

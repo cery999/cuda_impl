@@ -54,6 +54,10 @@ void cpu_blake3(uint8_t input[180], uint8_t target[32], uint64_t start,
     }
     if (found) {
       printf("cpu blake found: 1 random: %zu\n", random);
+      for(auto i = 0;i < 32 ;i++){
+          printf("%02x", out_process[i]);
+      }
+      printf("\n");
       break;
     }
   }
@@ -72,7 +76,7 @@ int main() {
   uint8_t *input = new uint8_t[180];
   uint8_t *target = new uint8_t[32];
   for (auto i = 0; i < 32; i++) {
-    target[i] = 0x0f;
+    target[i] = 0x01;
   }
   for (auto i = 8; i < 180; i += 4) {
     input[i] = 0xe7;
@@ -82,9 +86,9 @@ int main() {
   }
   uint64_t host_randoms;
   uint32_t found = 0;
-  auto start = 6;
-  auto end = 512 * 32 + 1;
-  auto stride = 1;
+  uint64_t start = 100;
+  uint64_t end = 500;
+  size_t stride = 1;
   cpu_blake3(input, target, start, end, stride);
   special_cuda_target(input, start, end, stride, target, &host_randoms, &found,
                       0);
