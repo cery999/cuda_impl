@@ -161,8 +161,9 @@ __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
   } while (0);
 
 __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
-                               uint64_t stride, uint8_t *d_target, uint32_t *out,
-                               uint64_t *block_random_idx, bool *block_found) {
+                               uint64_t stride, uint8_t *d_target,
+                               uint32_t *out, uint64_t *block_random_idx,
+                               bool *block_found) {
   auto idx = blockIdx.x * blockDim.x + threadIdx.x;
   uint64_t random_i = start + idx * stride; // parallel random message with i
   auto found = false;
@@ -172,7 +173,7 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
 
   __shared__ bool thread_tile_group_found[32 + 1];
   __shared__ uint64_t thread_tile_group_random[32 + 1];
-  if (random_i < end) {
+  if (random_i < end || random_i == UINT64_MAX) {
     // init chunk state
     // buf_len = 0, blocks_compressed = 0, flag = 0;
     uint32_t M[16] = {0}; // message blocks
@@ -363,12 +364,17 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
                                     const uint8_t target[32],
                                     uint64_t *host_randoms, uint32_t *found,
                                     uint8_t device_id) {
-  size_t num = ceil((end - start) * 1.0 / stride);
+  size_t num = 0;
+  if (end > start) {
+    num = ceil((end - start) * 1.0 / stride);
+  } else {
+    end = UINT64_MAX;
+    num = ceil((end - start + 1) * 1.0 / stride);
+  }
   dim3 block;
   dim3 grid;
   block = dim3(1024, 1, 1);
   grid = dim3(ceil(num * 1.0 / 1024), 1, 1);
-  printf("%d grid , %d block\n", grid.x, block.x);
   cudaEventRecord(event_start[device_id], 0);
   cudaMemcpyAsync(pined_inp[device_id], header + 8, INPUT_LEN - 8,
                   cudaMemcpyHostToDevice, 0);
@@ -385,7 +391,6 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   }
   grid = dim3(ceil((total_block_num * 1.0) / 1024), 1, 1);
   if (block.x > 1) {
-    printf("%d grid , %d block\n", grid.x, block.x);
     reduceGlobalBlocks<<<grid, block>>>(
         pined_found[device_id], pined_randoms[device_id], total_block_num);
   }
