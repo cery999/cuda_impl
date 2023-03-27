@@ -10,6 +10,10 @@
 // CUDA runtime
 #include <cuda_runtime.h>
 
+// includes, project
+#include <helper_cuda.h> // helper functions for CUDA error checking and initialization
+#include <helper_functions.h> // helper utility functions
+
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 using namespace cooperative_groups;
@@ -172,7 +176,7 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
 
   __shared__ bool thread_tile_group_found[32 + 1];
   __shared__ uint64_t thread_tile_group_random[32 + 1];
-  if (random_i <= end) {
+  if (random_i < end) {
     // init chunk state
     // buf_len = 0, blocks_compressed = 0, flag = 0;
     uint32_t M[16] = {0}; // message blocks
@@ -209,14 +213,13 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
       *(reinterpret_cast<int4 *>(&M[i * 4])) =
           *(reinterpret_cast<int4 *>(&d_header[i * 16 + 56 + 64]));
     }
-    *(reinterpret_cast<int2 *>(&M[13])) = make_int2(0, 0);
+    *(reinterpret_cast<int4 *>(&M[11])) = make_int4(0, 0, 0, 0);
     M[15] = 0;
 
     // init states
     UPDATE_WITH_CACHE;
     INIT(52, CHUNK_END | ROOT);
     ROUND;
-    /* UPDATE; */
     UPDATE_WITH_CACHE;
 
     uint32_t CV[8];
@@ -260,11 +263,11 @@ __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
 
     warp_group_found = tile.any(warp_group_found);
     warp_group_random = reduce(tile, warp_group_random, less<uint64_t>());
-    /* for (auto offset = 16; offset > 0; offset >>= 1) { */
+    /* for (auto offset = 8; offset > 0; offset >>= 1) { */
     /*   warp_group_found |= */
-    /*       __shfl_down_sync(0x0000ffff, warp_group_found, offset); */
+    /*       __shfl_down_sync(0x000000ff, warp_group_found, offset); */
     /*   warp_group_random = */
-    /*       min(__shfl_down_sync(0x0000ffff, warp_group_random, offset), */
+    /*       min(__shfl_down_sync(0x000000ff, warp_group_random, offset), */
     /*           warp_group_random); */
     /* } */
 
@@ -346,7 +349,7 @@ __global__ void reduceGlobalBlocks(bool *global_found, uint64_t *global_random,
       warp_group_random =
           min(warp_group_random,
               __shfl_down_sync(ballot_result, warp_group_random, offset));
-      if ((tid + offset) < shmem_extent) {
+      if (((tid + offset) < shmem_extent) && ((idx + offset) < num)) {
         found = warp_group_found;
         random = warp_group_random;
       }
@@ -369,6 +372,7 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   dim3 grid;
   block = dim3(1024, 1, 1);
   grid = dim3(ceil(num * 1.0 / 1024), 1, 1);
+  printf("%d grid , %d block\n", grid.x, block.x);
   cudaEventRecord(event_start[device_id], 0);
   cudaMemcpyAsync(pined_inp[device_id], header + 8, INPUT_LEN - 8,
                   cudaMemcpyHostToDevice, 0);
@@ -377,6 +381,8 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   special_launch<<<grid, block>>>(
       pined_inp[device_id], start, end, stride, pined_target[device_id],
       pined_out[device_id], pined_randoms[device_id], pined_found[device_id]);
+
+  checkCudaErrors(cudaGetLastError());
   auto total_block_num = grid.x;
   if (total_block_num >= 1024) {
     block = dim3(1024, 1, 1);
@@ -385,8 +391,9 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   }
   grid = dim3(ceil((total_block_num * 1.0) / 1024), 1, 1);
   if (block.x > 1) {
-    reduceGlobalBlocks<<<grid, block>>>(pined_found[device_id],
-                                        pined_randoms[device_id], total_block_num);
+    printf("%d grid , %d block\n", grid.x, block.x);
+    reduceGlobalBlocks<<<grid, block>>>(
+        pined_found[device_id], pined_randoms[device_id], total_block_num);
   }
   bool pined_host_found;
   cudaMemcpyAsync(&pined_host_found, pined_found[device_id], sizeof(bool),
