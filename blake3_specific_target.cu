@@ -10,10 +10,6 @@
 // CUDA runtime
 #include <cuda_runtime.h>
 
-// includes, project
-#include <helper_cuda.h> // helper functions for CUDA error checking and initialization
-#include <helper_functions.h> // helper utility functions
-
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 using namespace cooperative_groups;
@@ -165,7 +161,7 @@ __device__ uint32_t rotr32(uint32_t w, uint32_t c) {
   } while (0);
 
 __global__ void special_launch(uint8_t *d_header, uint64_t start, uint64_t end,
-                               size_t stride, uint8_t *d_target, uint32_t *out,
+                               uint64_t stride, uint8_t *d_target, uint32_t *out,
                                uint64_t *block_random_idx, bool *block_found) {
   auto idx = blockIdx.x * blockDim.x + threadIdx.x;
   uint64_t random_i = start + idx * stride; // parallel random message with i
@@ -363,7 +359,7 @@ __global__ void reduceGlobalBlocks(bool *global_found, uint64_t *global_random,
 }
 
 extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
-                                    uint64_t end, size_t stride,
+                                    uint64_t end, uint64_t stride,
                                     const uint8_t target[32],
                                     uint64_t *host_randoms, uint32_t *found,
                                     uint8_t device_id) {
@@ -381,8 +377,6 @@ extern "C" void special_cuda_target(const uint8_t *header, uint64_t start,
   special_launch<<<grid, block>>>(
       pined_inp[device_id], start, end, stride, pined_target[device_id],
       pined_out[device_id], pined_randoms[device_id], pined_found[device_id]);
-
-  checkCudaErrors(cudaGetLastError());
   auto total_block_num = grid.x;
   if (total_block_num >= 1024) {
     block = dim3(1024, 1, 1);

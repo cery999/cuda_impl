@@ -4,7 +4,7 @@
 extern "C" void to_big_kernel();
 extern "C" void pre_allocate(uint8_t device_id);
 extern "C" void special_cuda_target(uint8_t *header, size_t start, size_t end,
-                                    size_t stride, uint8_t target[32],
+                                    uint64_t stride, uint8_t target[32],
                                     uint64_t *host_randoms, uint32_t *found,
                                     uint8_t device_id);
 extern "C" void getDeviceNum(int32_t *num);
